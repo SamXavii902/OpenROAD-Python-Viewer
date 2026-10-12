@@ -69,6 +69,7 @@ class DisplayOptions:
         self._show_obstructions: bool = True
         self._show_fills: bool = True
         self._show_io_pins: bool = True
+        self._show_io_pin_names: bool = True
         self._show_tracks: bool = True
         self._show_pref_tracks: bool = True
         self._show_non_pref_tracks: bool = False
@@ -196,6 +197,15 @@ class DisplayOptions:
 
     def areIOPinsVisible(self) -> bool:
         return self._show_io_pins
+
+    def setIOPinsVisible(self, visible: bool) -> None:
+        self._show_io_pins = visible
+
+    def areIOPinNamesVisible(self) -> bool:
+        return self._show_io_pin_names
+
+    def setIOPinNamesVisible(self, visible: bool) -> None:
+        self._show_io_pin_names = visible
 
     def areTracksVisible(self) -> bool:
         return self._show_tracks

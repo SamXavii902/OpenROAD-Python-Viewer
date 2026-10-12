@@ -6,6 +6,7 @@ from openroad_py.odb.types import (
     dbOrientType,
     dbPlacementStatus,
     dbSigType,
+    dbIoType,
     dbTechLayerDir,
     dbWireType,
 )
@@ -183,6 +184,7 @@ class dbBTerm:
         self._block: "dbBlock" = block
         self._name: str = name
         self._sig_type: dbSigType = sig_type
+        self._io_type: dbIoType = dbIoType.INOUT
         self._bpins: List[dbBPin] = []
         self._net: Optional["dbNet"] = None
 
@@ -194,6 +196,12 @@ class dbBTerm:
 
     def setSigType(self, sig_type: dbSigType) -> None:
         self._sig_type = sig_type
+
+    def getIoType(self) -> dbIoType:
+        return self._io_type
+
+    def setIoType(self, io_type: dbIoType) -> None:
+        self._io_type = io_type
 
     def addBPin(self, bpin: dbBPin) -> None:
         self._bpins.append(bpin)

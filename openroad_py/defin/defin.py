@@ -8,6 +8,7 @@ from openroad_py.odb.types import (
     dbOrientType,
     dbPlacementStatus,
     dbSigType,
+    dbIoType,
     dbTechLayerDir,
     dbWireType,
 )
@@ -439,6 +440,14 @@ class DefParser:
                         idx += 2
                     elif t == "DIRECTION":
                         dir_str = tokens[idx + 1].upper()
+                        if dir_str == "INPUT":
+                            bterm.setIoType(dbIoType.INPUT)
+                        elif dir_str == "OUTPUT":
+                            bterm.setIoType(dbIoType.OUTPUT)
+                        elif dir_str == "INOUT":
+                            bterm.setIoType(dbIoType.INOUT)
+                        elif dir_str == "FEEDTHRU":
+                            bterm.setIoType(dbIoType.FEEDTHRU)
                         idx += 2
                     elif t == "USE":
                         use_str = tokens[idx + 1].upper()

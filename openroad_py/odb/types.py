@@ -65,6 +65,13 @@ class dbSigType(Enum):
     RESET = auto()
 
 
+class dbIoType(Enum):
+    INPUT = auto()
+    OUTPUT = auto()
+    INOUT = auto()
+    FEEDTHRU = auto()
+
+
 class dbMasterType(Enum):
     CORE = auto()
     CORE_ANTENNACELL = auto()

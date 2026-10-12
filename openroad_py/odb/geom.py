@@ -94,6 +94,12 @@ class Rect:
     def area(self) -> int:
         return self.dx() * self.dy()
 
+    def maxDXDY(self) -> int:
+        return max(self.dx(), self.dy())
+
+    def minDXDY(self) -> int:
+        return min(self.dx(), self.dy())
+
     def set_xlo(self, x: int) -> None:
         self._xlo = int(x)
 

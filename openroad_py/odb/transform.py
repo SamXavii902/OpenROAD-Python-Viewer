@@ -8,9 +8,13 @@ from openroad_py.odb.types import dbOrientType
 class dbTransform:
     """Represents a 2D affine transform consisting of orientation and offset (translation)."""
 
-    def __init__(self, orient: dbOrientType = dbOrientType.R0, offset: Point = None):
-        self._orient: dbOrientType = orient if isinstance(orient, dbOrientType) else dbOrientType.R0
-        self._offset: Point = Point(offset.x, offset.y) if offset is not None else Point(0, 0)
+    def __init__(self, orient: Union[dbOrientType, Point] = dbOrientType.R0, offset: Point = None):
+        if isinstance(orient, Point):
+            self._orient = dbOrientType.R0
+            self._offset = Point(orient.x, orient.y)
+        else:
+            self._orient = orient if isinstance(orient, dbOrientType) else dbOrientType.R0
+            self._offset = Point(offset.x, offset.y) if offset is not None else Point(0, 0)
 
     @property
     def orient(self) -> dbOrientType:

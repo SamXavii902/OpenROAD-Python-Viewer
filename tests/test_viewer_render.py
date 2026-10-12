@@ -97,3 +97,73 @@ def test_viewer_placement_density_heatmap(qapp):
     viewer.repaint()
     viewer.close()
 
+
+def test_viewer_renders_iopins_with_layers_off(qapp):
+    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_tech.lef"
+    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_stdcell.lef"
+    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\src\odb\test\data\gcd\gcd_nangate45_route.def"
+
+    db = dbDatabase()
+    lef_parser = LefParser(db)
+    lef_parser.parse_file(lef_path1)
+    lef_parser.parse_file(lef_path2)
+
+    def_parser = DefParser(db)
+    block = def_parser.parse_file(def_path)
+    chip = db.getChip()
+
+    assert len(block.getBTerms()) > 0, "Design should have IO pins"
+
+    viewer = LayoutViewer()
+    viewer.resize(800, 600)
+    viewer.setChip(chip)
+    viewer.fit()
+
+    options = viewer.getOptions()
+    # Turn OFF all tech layers (metal, cut, etc.)
+    for layer in chip.getTech().getLayers():
+        options.setVisible(layer, False)
+    # Turn off rows so only IO pins produce green pixels
+    options._show_rows = False
+
+    # Ensure IO pins are visible
+    options.setIOPinsVisible(True)
+    assert options.areIOPinsVisible() is True
+
+    test_image = QImage(800, 600, QImage.Format_ARGB32_Premultiplied)
+    draw_bounds = QRect(0, 0, 800, 600)
+    viewer._render_thread.draw(test_image, draw_bounds)
+
+    # Verify that green IO pin pixels are rendered along the perimeter
+    pin_col = options.ioPinColor()
+    found_pin_pixels = False
+    for y in range(0, 600):
+        for x in range(0, 800):
+            pixel = test_image.pixelColor(x, y)
+            # Check for green pin color
+            if pixel.green() >= 140 and pixel.green() > pixel.red() + 30 and pixel.green() > pixel.blue() + 30:
+                found_pin_pixels = True
+                break
+        if found_pin_pixels:
+            break
+
+    assert found_pin_pixels, "IO pins should be visible in green even with all layers switched off"
+
+    # Now turn off IO pins and verify green pin pixels disappear
+    options.setIOPinsVisible(False)
+    test_image_no_pins = QImage(800, 600, QImage.Format_ARGB32_Premultiplied)
+    viewer._render_thread.draw(test_image_no_pins, draw_bounds)
+
+    found_pin_pixels_when_off = False
+    for y in range(0, 600):
+        for x in range(0, 800):
+            pixel = test_image_no_pins.pixelColor(x, y)
+            if pixel.green() >= 140 and pixel.green() > pixel.red() + 30 and pixel.green() > pixel.blue() + 30:
+                found_pin_pixels_when_off = True
+                break
+        if found_pin_pixels_when_off:
+            break
+
+    assert not found_pin_pixels_when_off, "IO pins should not be drawn when toggled off"
+    viewer.close()
+

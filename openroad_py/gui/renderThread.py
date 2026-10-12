@@ -19,7 +19,9 @@ from openroad_py.odb.types import (
     dbOrientType,
     dbTechLayerType,
     dbTechLayerDir,
+    dbIoType,
 )
+from openroad_py.odb.transform import dbTransform
 from openroad_py.odb.tech import dbTech, dbTechLayer
 from openroad_py.odb.lib import dbMaster
 from openroad_py.odb.block import dbBlock, dbInst, dbRow
@@ -601,16 +603,168 @@ class RenderThread(QThread):
     # Ported from: gui/src/renderThread.cpp:1681 drawIOPins
     def drawIOPins(self, painter: QPainter, block: dbBlock, bounds: Rect) -> None:
         options = self._viewer.getOptions()
+        if not options.areIOPinsVisible():
+            return
+
+        die_rect = block.getDieArea()
+        if die_rect.area() <= 0:
+            die_rect = block.getBBox()
+
+        ppd = self._viewer.pixels_per_dbu
+        scale_adjust = 1.0 / ppd if ppd > 0 else 1.0
+
+        die_max_dim = min(die_rect.maxDXDY(), bounds.maxDXDY()) if (bounds and bounds.area() > 0) else die_rect.maxDXDY()
+        if die_max_dim <= 0:
+            die_max_dim = 100000
+
+        scale_factor = 0.02
+        pin_max_size = scale_factor * die_max_dim
+        abs_min_size = 8.0 / ppd if ppd > 0 else 8.0
+        pin_max_size = max(pin_max_size, abs_min_size)
+        max_px_size = 28.0 / ppd if ppd > 0 else pin_max_size
+        pin_max_size = min(pin_max_size, max_px_size)
+
+        w = max(int(pin_max_size // 4), 1)
+        h = max(int(pin_max_size), 2)
+
+        in_marker = [
+            Point(w, h),
+            Point(0, 0),
+            Point(-w, h),
+        ]
+        out_marker = [
+            Point(0, h),
+            Point(-w, 0),
+            Point(w, 0),
+        ]
+        bi_marker = [
+            Point(0, 0),
+            Point(-w, h // 2),
+            Point(0, h),
+            Point(w, h // 2),
+        ]
+
+        pin_color = options.ioPinColor()
+        marker_pen = QPen(pin_color.darker(140), 1)
+        marker_pen.setCosmetic(True)
+        marker_brush = QBrush(pin_color)
+
+        box_pen = QPen(pin_color, 1)
+        box_pen.setCosmetic(True)
+        box_brush = QBrush(pin_color)
+
+        draw_names = options.areIOPinNamesVisible() and (pin_max_size * ppd >= 14)
+        if draw_names:
+            font_pin = QFont("Segoe UI", 7, QFont.Bold)
+            fm_pin = QFontMetrics(font_pin)
+
         for bterm in block.getBTerms():
             if self._restart:
                 break
+
+            io_type = bterm.getIoType()
+            if io_type == dbIoType.INPUT:
+                template = in_marker
+            elif io_type == dbIoType.OUTPUT:
+                template = out_marker
+            elif io_type == dbIoType.INOUT:
+                template = bi_marker
+            else:
+                lname = bterm.getName().lower()
+                if lname.startswith("in_") or lname.startswith("i_") or lname.endswith("_in"):
+                    template = in_marker
+                elif lname.startswith("out_") or lname.startswith("o_") or lname.endswith("_out"):
+                    template = out_marker
+                else:
+                    template = bi_marker
+
             for bpin in bterm.getBPins():
-                for layer, box in bpin.getBoxes():
-                    if (layer is None or options.isVisible(layer)) and box.intersects(bounds):
-                        color = options.color(layer) if layer else QColor(80, 220, 80)
-                        painter.setPen(QPen(color, 0))
-                        painter.setBrush(QBrush(color))
-                        painter.drawRect(box.xMin(), box.yMin(), box.dx(), box.dy())
+                if self._restart:
+                    break
+
+                boxes = bpin.getBoxes()
+                if not boxes and bpin.hasLoc():
+                    loc = bpin.getLoc()
+                    d = 140
+                    boxes = [(None, Rect(loc.x - d, loc.y - d, loc.x + d, loc.y + d))]
+
+                for layer, box in boxes:
+                    # Check visibility against query bounds (with margin for marker)
+                    expand_m = int(pin_max_size * 1.5)
+                    query_box = Rect(box.xMin() - expand_m, box.yMin() - expand_m, box.xMax() + expand_m, box.yMax() + expand_m)
+                    if not query_box.intersects(bounds):
+                        continue
+
+                    pin_center = Point((box.xMin() + box.xMax()) // 2, (box.yMin() + box.yMax()) // 2)
+
+                    # Compute closest edge of die boundary
+                    dist_to_left = abs(box.xMin() - die_rect.xMin())
+                    dist_to_right = abs(box.xMax() - die_rect.xMax())
+                    dist_to_top = abs(box.yMax() - die_rect.yMax())
+                    dist_to_bot = abs(box.yMin() - die_rect.yMin())
+                    dists = [dist_to_left, dist_to_right, dist_to_top, dist_to_bot]
+                    min_dist = min(dists)
+                    arg_min = dists.index(min_dist)
+
+                    if arg_min == 0:  # Left edge
+                        orient = dbOrientType.R90
+                        offset_x = die_rect.xMin() if dist_to_left <= pin_max_size * 2 else pin_center.x
+                        offset = Point(offset_x, pin_center.y)
+                    elif arg_min == 1:  # Right edge
+                        orient = dbOrientType.R270
+                        offset_x = die_rect.xMax() if dist_to_right <= pin_max_size * 2 else pin_center.x
+                        offset = Point(offset_x, pin_center.y)
+                    elif arg_min == 2:  # Top edge
+                        orient = dbOrientType.R0
+                        offset_y = die_rect.yMax() if dist_to_top <= pin_max_size * 2 else pin_center.y
+                        offset = Point(pin_center.x, offset_y)
+                    else:  # Bottom edge
+                        orient = dbOrientType.MX
+                        offset_y = die_rect.yMin() if dist_to_bot <= pin_max_size * 2 else pin_center.y
+                        offset = Point(pin_center.x, offset_y)
+
+                    xfm = dbTransform(orient, offset)
+                    qpoly = QPolygonF()
+                    for pt in template:
+                        tpt = xfm.apply_to_point(pt)
+                        qpoly.append(QPointF(tpt.x, tpt.y))
+
+                    # 1. Draw marker polygon (directional indicator)
+                    painter.setPen(marker_pen)
+                    painter.setBrush(marker_brush)
+                    painter.drawPolygon(qpoly)
+
+                    # 2. Draw physical pin geometry
+                    painter.setPen(box_pen)
+                    painter.setBrush(box_brush)
+                    painter.drawRect(box.xMin(), box.yMin(), box.dx(), box.dy())
+
+                    # 3. Draw pin name if zoomed in
+                    if draw_names:
+                        name = bterm.getName()
+                        painter.save()
+                        painter.setFont(font_pin)
+                        painter.setPen(QPen(QColor(240, 255, 240), 0))
+                        tw = fm_pin.horizontalAdvance(name)
+                        th = fm_pin.height()
+                        tx, ty = offset.x, offset.y
+                        if arg_min == 0:  # Left
+                            painter.translate(tx - int(pin_max_size + 4 / ppd), ty)
+                            painter.scale(scale_adjust, -scale_adjust)
+                            painter.drawText(-tw, th // 3, name)
+                        elif arg_min == 1:  # Right
+                            painter.translate(tx + int(pin_max_size + 4 / ppd), ty)
+                            painter.scale(scale_adjust, -scale_adjust)
+                            painter.drawText(0, th // 3, name)
+                        elif arg_min == 2:  # Top
+                            painter.translate(tx, ty + int(pin_max_size + 4 / ppd))
+                            painter.scale(scale_adjust, -scale_adjust)
+                            painter.drawText(-tw // 2, th, name)
+                        else:  # Bottom
+                            painter.translate(tx, ty - int(pin_max_size + 4 / ppd))
+                            painter.scale(scale_adjust, -scale_adjust)
+                            painter.drawText(-tw // 2, 0, name)
+                        painter.restore()
 
     # Ported from: gui/src/renderThread.cpp:659 drawInstanceNames
     def drawInstanceNames(self, painter: QPainter, insts: List[dbInst]) -> None:

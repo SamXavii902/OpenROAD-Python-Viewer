@@ -112,6 +112,8 @@ class DisplayControls(QDockWidget):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
             item.setData(0, Qt.UserRole, attr)
+            if attr == "_show_io_pins":
+                item.setIcon(1, self._create_color_icon(options.ioPinColor()))
             self._object_items[attr] = item
 
     def sync_option(self, attr: str, checked: bool) -> None:
