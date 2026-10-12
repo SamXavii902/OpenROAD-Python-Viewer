@@ -20,6 +20,7 @@ class dbTechLayer:
         self._type: dbTechLayerType = layer_type
         self._direction: dbTechLayerDir = direction
         self._width: int = width
+        self._spacing: int = 0
         self._pitch_x: int = pitch
         self._pitch_y: int = pitch
         self._routing_level: int = 0
@@ -38,6 +39,9 @@ class dbTechLayer:
 
     def getWidth(self) -> int:
         return self._width
+
+    def getSpacing(self) -> int:
+        return self._spacing
 
     def getPitch(self) -> int:
         return self._pitch_x
@@ -68,6 +72,9 @@ class dbTechLayer:
 
     def setWidth(self, w: int) -> None:
         self._width = w
+
+    def setSpacing(self, s: int) -> None:
+        self._spacing = s
 
     def setPitch(self, p: int) -> None:
         self._pitch_x = p

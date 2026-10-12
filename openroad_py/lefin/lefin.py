@@ -1,7 +1,7 @@
 """LEF file parser ported from OpenROAD odb/src/lefin/lefin.cpp."""
 
 import os
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Tuple
 from openroad_py.lefin.tokenizer import tokenize_stream, TokenReader
 from openroad_py.odb.geom import Rect, Polygon, Point
 from openroad_py.odb.types import (
@@ -13,6 +13,88 @@ from openroad_py.odb.types import (
 from openroad_py.odb.tech import dbTech, dbTechLayer, dbTechVia, dbSite
 from openroad_py.odb.lib import dbLib, dbMaster, dbMTerm, dbMPin, dbBox
 from openroad_py.odb.database import dbDatabase
+
+
+def _extract_rect_coords(tokens: List[str]) -> Optional[Tuple[float, float, float, float]]:
+    """Extract (x1, y1, x2, y2) from RECT tokens, skipping MASK, ITERATE, parens, and extraneous keywords."""
+    nums: List[float] = []
+    i = 0
+    n = len(tokens)
+    while i < n and len(nums) < 4:
+        tok = tokens[i]
+        u = tok.upper()
+        if u == "MASK":
+            i += 2  # skip MASK and <mask_num>
+            continue
+        if u in ("SAMEMASK", "ITERATE", "(", ")"):
+            i += 1
+            continue
+        try:
+            val = float(tok)
+            nums.append(val)
+        except ValueError:
+            pass
+        i += 1
+    if len(nums) >= 4:
+        return nums[0], nums[1], nums[2], nums[3]
+    return None
+
+
+def _extract_polygon_points(tokens: List[str]) -> List[Tuple[float, float]]:
+    """Extract [(x1, y1), ...] points from POLYGON tokens, skipping MASK, parens, etc."""
+    nums: List[float] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        u = tok.upper()
+        if u == "MASK":
+            i += 2
+            continue
+        if u in ("SAMEMASK", "(", ")"):
+            i += 1
+            continue
+        try:
+            val = float(tok)
+            nums.append(val)
+        except ValueError:
+            pass
+        i += 1
+    pts: List[Tuple[float, float]] = []
+    for j in range(0, len(nums) - 1, 2):
+        pts.append((nums[j], nums[j + 1]))
+    return pts
+
+
+def _extract_via_info(tokens: List[str]) -> Optional[Tuple[str, float, float]]:
+    """Extract (via_name, x, y) from PORT VIA tokens: VIA [MASK <num>] <via_name> <x> <y> or VIA [MASK <num>] <x> <y> <via_name>."""
+    filtered: List[str] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        u = tok.upper()
+        if u == "MASK":
+            i += 2
+            continue
+        if u in ("SAMEMASK", "ITERATE", "(", ")"):
+            i += 1
+            continue
+        filtered.append(tok)
+        i += 1
+
+    via_name: Optional[str] = None
+    coords: List[float] = []
+    for item in filtered:
+        try:
+            val = float(item)
+            coords.append(val)
+        except ValueError:
+            if via_name is None:
+                via_name = item
+    if via_name and len(coords) >= 2:
+        return via_name, coords[0], coords[1]
+    return None
 
 
 class LefParser:
@@ -99,8 +181,9 @@ class LefParser:
             tok = reader.next()
             if tok.upper() == "END":
                 name = reader.peek()
-                if name.upper() == section_name.upper():
-                    reader.next()
+                if name == ";" or name.upper() in (section_name.upper(), "VIARULE", "NONDEFAULTRULE", "PROPERTYDEFINITIONS"):
+                    if name != ";":
+                        reader.next()
                     if reader.peek() == ";":
                         reader.next()
                     break
@@ -158,16 +241,36 @@ class LefParser:
                 elif dir_name == "VERTICAL":
                     layer.setDirection(dbTechLayerDir.VERTICAL)
                 reader.read_until_semicolon()
+            elif u == "SPACING":
+                tokens = reader.read_until_semicolon()
+                for t in tokens:
+                    try:
+                        val = float(t)
+                        layer.setSpacing(self.dbu(val))
+                        break
+                    except ValueError:
+                        continue
             elif u == "WIDTH":
-                val = float(reader.next())
-                layer.setWidth(self.dbu(val))
-                reader.read_until_semicolon()
+                tokens = reader.read_until_semicolon()
+                for t in tokens:
+                    try:
+                        val = float(t)
+                        layer.setWidth(self.dbu(val))
+                        break
+                    except ValueError:
+                        continue
             elif u == "PITCH":
                 tokens = reader.read_until_semicolon()
-                if tokens:
-                    px = float(tokens[0])
-                    py = float(tokens[1]) if len(tokens) > 1 else px
-                    layer.setPitchXY(self.dbu(px), self.dbu(py))
+                nums = []
+                for t in tokens:
+                    try:
+                        nums.append(float(t))
+                    except ValueError:
+                        continue
+                if len(nums) == 1:
+                    layer.setPitch(self.dbu(nums[0]))
+                elif len(nums) >= 2:
+                    layer.setPitchXY(self.dbu(nums[0]), self.dbu(nums[1]))
             elif u == "PROPERTY":
                 reader.read_until_semicolon()
             else:
@@ -196,10 +299,12 @@ class LefParser:
                 reader.read_until_semicolon()
             elif u == "RECT":
                 tokens = reader.read_until_semicolon()
-                if len(tokens) >= 4 and curr_layer is not None:
-                    x1, y1, x2, y2 = [float(v) for v in tokens[:4]]
-                    rect = Rect(self.dbu(x1), self.dbu(y1), self.dbu(x2), self.dbu(y2))
-                    via.addBox(curr_layer, rect)
+                if curr_layer is not None:
+                    coords = _extract_rect_coords(tokens)
+                    if coords is not None:
+                        x1, y1, x2, y2 = coords
+                        rect = Rect(self.dbu(x1), self.dbu(y1), self.dbu(x2), self.dbu(y2))
+                        via.addBox(curr_layer, rect)
             elif u == "DEFAULT":
                 pass
             else:
@@ -226,12 +331,16 @@ class LefParser:
                 site.setClass(cls_name)
                 reader.read_until_semicolon()
             elif u == "SIZE":
-                w_val = float(reader.next())
-                reader.expect("BY")
-                h_val = float(reader.next())
-                site.setWidth(self.dbu(w_val))
-                site.setHeight(self.dbu(h_val))
-                reader.read_until_semicolon()
+                tokens = reader.read_until_semicolon()
+                nums = []
+                for t in tokens:
+                    try:
+                        nums.append(float(t))
+                    except ValueError:
+                        continue
+                if len(nums) >= 2:
+                    site.setWidth(self.dbu(nums[0]))
+                    site.setHeight(self.dbu(nums[1]))
             else:
                 reader.read_until_semicolon()
 
@@ -261,17 +370,26 @@ class LefParser:
                     macro.setType(dbMasterType.PAD)
                 reader.read_until_semicolon()
             elif u == "ORIGIN":
-                ox = float(reader.next())
-                oy = float(reader.next())
-                macro.setOrigin(Point(self.dbu(ox), self.dbu(oy)))
-                reader.read_until_semicolon()
+                tokens = reader.read_until_semicolon()
+                nums = []
+                for t in tokens:
+                    try:
+                        nums.append(float(t))
+                    except ValueError:
+                        continue
+                if len(nums) >= 2:
+                    macro.setOrigin(Point(self.dbu(nums[0]), self.dbu(nums[1])))
             elif u == "SIZE":
-                w = float(reader.next())
-                reader.expect("BY")
-                h = float(reader.next())
-                macro.setWidth(self.dbu(w))
-                macro.setHeight(self.dbu(h))
-                reader.read_until_semicolon()
+                tokens = reader.read_until_semicolon()
+                nums = []
+                for t in tokens:
+                    try:
+                        nums.append(float(t))
+                    except ValueError:
+                        continue
+                if len(nums) >= 2:
+                    macro.setWidth(self.dbu(nums[0]))
+                    macro.setHeight(self.dbu(nums[1]))
             elif u == "PIN":
                 self._parse_pin(reader, macro)
             elif u == "OBS":
@@ -330,34 +448,36 @@ class LefParser:
                 reader.read_until_semicolon()
             elif u == "RECT":
                 tokens = reader.read_until_semicolon()
-                if len(tokens) >= 4 and curr_layer is not None:
-                    x1, y1, x2, y2 = [float(v) for v in tokens[:4]]
-                    rect = Rect(self.dbu(x1), self.dbu(y1), self.dbu(x2), self.dbu(y2))
-                    mpin.addGeometry(dbBox(curr_layer, rect))
+                if curr_layer is not None:
+                    coords = _extract_rect_coords(tokens)
+                    if coords is not None:
+                        x1, y1, x2, y2 = coords
+                        rect = Rect(self.dbu(x1), self.dbu(y1), self.dbu(x2), self.dbu(y2))
+                        mpin.addGeometry(dbBox(curr_layer, rect))
             elif u == "POLYGON":
                 tokens = reader.read_until_semicolon()
-                if len(tokens) >= 6 and curr_layer is not None:
-                    pts = []
-                    for i in range(0, len(tokens) - 1, 2):
-                        pts.append(Point(self.dbu(float(tokens[i])), self.dbu(float(tokens[i + 1]))))
-                    mpin.addPolygon(curr_layer, Polygon(pts))
+                if curr_layer is not None:
+                    pts = _extract_polygon_points(tokens)
+                    if len(pts) >= 3:
+                        poly_pts = [Point(self.dbu(x), self.dbu(y)) for x, y in pts]
+                        mpin.addPolygon(curr_layer, Polygon(poly_pts))
             elif u == "VIA":
-                via_name = reader.next()
-                vx = float(reader.next())
-                vy = float(reader.next())
-                tech_via = self._tech.findVia(via_name)
-                if tech_via is not None:
-                    via_xy = Point(self.dbu(vx), self.dbu(vy))
-                    for vb in tech_via.getBoxes():
-                        vbox = vb.getBox()
-                        rect = Rect(
-                            vbox.xMin() + via_xy.x,
-                            vbox.yMin() + via_xy.y,
-                            vbox.xMax() + via_xy.x,
-                            vbox.yMax() + via_xy.y,
-                        )
-                        mpin.addGeometry(dbBox(vb.getTechLayer(), rect, is_via=True, tech_via=tech_via, via_xy=via_xy))
-                reader.read_until_semicolon()
+                tokens = reader.read_until_semicolon()
+                info = _extract_via_info(tokens)
+                if info is not None:
+                    via_name, vx, vy = info
+                    tech_via = self._tech.findVia(via_name)
+                    if tech_via is not None:
+                        via_xy = Point(self.dbu(vx), self.dbu(vy))
+                        for vb in tech_via.getBoxes():
+                            vbox = vb.getBox()
+                            rect = Rect(
+                                vbox.xMin() + via_xy.x,
+                                vbox.yMin() + via_xy.y,
+                                vbox.xMax() + via_xy.x,
+                                vbox.yMax() + via_xy.y,
+                            )
+                            mpin.addGeometry(dbBox(vb.getTechLayer(), rect, is_via=True, tech_via=tech_via, via_xy=via_xy))
             else:
                 reader.read_until_semicolon()
 
@@ -378,16 +498,19 @@ class LefParser:
                 reader.read_until_semicolon()
             elif u == "RECT":
                 tokens = reader.read_until_semicolon()
-                if len(tokens) >= 4 and curr_layer is not None:
-                    x1, y1, x2, y2 = [float(v) for v in tokens[:4]]
-                    rect = Rect(self.dbu(x1), self.dbu(y1), self.dbu(x2), self.dbu(y2))
-                    macro.addObstruction(dbBox(curr_layer, rect))
+                if curr_layer is not None:
+                    coords = _extract_rect_coords(tokens)
+                    if coords is not None:
+                        x1, y1, x2, y2 = coords
+                        rect = Rect(self.dbu(x1), self.dbu(y1), self.dbu(x2), self.dbu(y2))
+                        macro.addObstruction(dbBox(curr_layer, rect))
             elif u == "POLYGON":
                 tokens = reader.read_until_semicolon()
-                if len(tokens) >= 6 and curr_layer is not None:
-                    pts = []
-                    for i in range(0, len(tokens) - 1, 2):
-                        pts.append(Point(self.dbu(float(tokens[i])), self.dbu(float(tokens[i + 1]))))
-                    macro.addPolyObstruction(curr_layer, Polygon(pts))
+                if curr_layer is not None:
+                    pts = _extract_polygon_points(tokens)
+                    if len(pts) >= 3:
+                        poly_pts = [Point(self.dbu(x), self.dbu(y)) for x, y in pts]
+                        macro.addPolyObstruction(curr_layer, Polygon(poly_pts))
             else:
                 reader.read_until_semicolon()
+

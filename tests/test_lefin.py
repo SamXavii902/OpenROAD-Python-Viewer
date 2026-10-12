@@ -82,3 +82,96 @@ def test_parse_sky130_lefs():
     assert inv is not None
     assert inv.getWidth() > 0
     assert inv.getHeight() > 0
+
+
+def test_parse_lef_with_mask(tmp_path):
+    lef_content = """VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+
+LAYER met1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.2 ;
+  WIDTH 0.1 ;
+  SPACING 0.1 MASK 1 ;
+END met1
+
+LAYER cut1
+  TYPE CUT ;
+  WIDTH 0.1 ;
+END cut1
+
+VIA via1 DEFAULT
+  LAYER met1 ;
+    RECT MASK 1 -0.05 -0.05 0.05 0.05 ;
+  LAYER cut1 ;
+    RECT MASK 2 -0.03 -0.03 0.03 0.03 ;
+END via1
+
+MACRO test_macro
+  CLASS CORE ;
+  ORIGIN 0.0 0.0 ;
+  SIZE 1.0 BY 2.0 ;
+  PIN A
+    DIRECTION INPUT ;
+    PORT
+      LAYER met1 ;
+        RECT MASK 1 0.1 0.2 0.3 0.4 ;
+        RECT MASK 2 ITERATE ( 0.5 0.6 ) ( 0.7 0.8 ) ;
+        POLYGON MASK 1 0.1 0.1 0.2 0.1 0.2 0.2 0.1 0.2 ;
+        VIA MASK 101 via1 0.5 0.5 ;
+    END
+  END A
+  OBS
+    LAYER met1 ;
+      RECT MASK 3 0.0 0.0 1.0 1.0 ;
+      POLYGON MASK 1 0.0 0.0 0.5 0.0 0.5 0.5 0.0 0.5 ;
+  END
+END test_macro
+
+END LIBRARY
+"""
+    lef_file = tmp_path / "test_mask.lef"
+    lef_file.write_text(lef_content, encoding="utf-8")
+
+    db = dbDatabase()
+    parser = LefParser(db)
+    parser.parse_file(str(lef_file))
+
+    tech = db.getTech()
+    assert tech is not None
+    assert tech.getDbuPerMicron() == 1000
+
+    via1 = tech.findVia("via1")
+    assert via1 is not None
+    assert len(via1.getBoxes()) == 2
+    b0 = via1.getBoxes()[0].getBox()
+    assert b0.xMin() == -50 and b0.yMin() == -50 and b0.xMax() == 50 and b0.yMax() == 50
+
+    libs = db.getLibs()
+    assert len(libs) == 1
+    macro = libs[0].findMaster("test_macro")
+    assert macro is not None
+    assert macro.getWidth() == 1000
+    assert macro.getHeight() == 2000
+
+    mterm = macro.findMTerm("A")
+    assert mterm is not None
+    mpins = mterm.getMPins()
+    assert len(mpins) == 1
+    geoms = mpins[0].getGeometry()
+    # 2 rects + 2 via boxes = 4 boxes
+    assert len(geoms) == 4
+    polys = mpins[0].getPolygonGeometry()
+    assert len(polys) == 1
+
+    obs = macro.getObstructions()
+    assert len(obs) == 1
+    poly_obs = macro.getPolygonObstructions()
+    assert len(poly_obs) == 1
+
