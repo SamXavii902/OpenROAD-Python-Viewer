@@ -408,7 +408,18 @@ class MainWindow(QMainWindow):
         finally:
             progress.setValue(total_steps)
 
-    def load_lef(self, filepath: str) -> None:
+    def load_lef(self, filepath: str, progress: Optional[QProgressDialog] = None) -> None:
+        base = os.path.basename(filepath)
+        own_progress = False
+        if progress is None:
+            progress = QProgressDialog(f"Parsing LEF: {base}...", None, 0, 1, self)
+            progress.setWindowTitle("Loading LEF File")
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+            own_progress = True
+            QApplication.processEvents()
+
         try:
             parser = LefParser(self._db)
             parser.parse_file(filepath)
@@ -417,27 +428,80 @@ class MainWindow(QMainWindow):
             if tech:
                 self._viewer.getOptions().tech_init(tech)
             self._controls.refresh()
-            self._status_bar.showMessage(f"Loaded LEF: {os.path.basename(filepath)}", 4000)
+            self._status_bar.showMessage(f"Loaded LEF: {base}", 4000)
         except Exception as e:
             QMessageBox.critical(self, "LEF Error", f"Failed to load LEF:\n{str(e)}")
+        finally:
+            if own_progress and progress:
+                progress.setValue(1)
 
     def load_def(self, filepath: str) -> None:
+        def_base = os.path.basename(filepath)
+        total_steps = 6
+        progress = QProgressDialog(f"Initializing DEF parser for {def_base}...", "Cancel", 0, total_steps, self)
+        progress.setWindowTitle("Loading DEF File")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        QApplication.processEvents()
+
+        def on_def_progress(stage: str, cur: int, total: int) -> None:
+            if total > 0:
+                pct = int(cur * 100 / total)
+                progress.setLabelText(f"Parsing DEF: {def_base}\n{stage}: {cur:,} / {total:,} ({pct}%)...")
+            else:
+                progress.setLabelText(f"Parsing DEF: {def_base}\n{stage}: {cur:,}...")
+            QApplication.processEvents()
+
         try:
+            progress.setValue(1)
+            progress.setLabelText(f"Parsing layout from {def_base}...")
+            QApplication.processEvents()
+
             parser = DefParser(self._db)
-            block = parser.parse_file(filepath)
+            block = parser.parse_file(filepath, callback=on_def_progress)
+            if progress.wasCanceled():
+                return
             self._def_file = filepath
             chip = self._db.getChip()
-            self._viewer.setChip(chip)
-            self._controls.refresh()
-            self._inspector.update_design(chip)
-            self._search_dock.setChip(chip)
 
+            progress.setValue(2)
             inst_count = len(block.getInsts())
+            progress.setLabelText(f"Building spatial index ({inst_count:,} instances)...")
+            QApplication.processEvents()
+            self._viewer.setChip(chip)
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                return
+
+            progress.setValue(3)
+            progress.setLabelText("Configuring layer display controls...")
+            QApplication.processEvents()
+            self._controls.refresh()
+            QApplication.processEvents()
+
+            progress.setValue(4)
+            progress.setLabelText("Updating design inspector...")
+            QApplication.processEvents()
+            self._inspector.update_design(chip)
+            QApplication.processEvents()
+
+            progress.setValue(5)
+            progress.setLabelText("Indexing objects for fast search...")
+            QApplication.processEvents()
+            self._search_dock.setChip(chip)
+            QApplication.processEvents()
+
             net_count = len(block.getNets())
             self._info_label.setText(f"Design: {block.getName()} | {inst_count:,} Insts | {net_count:,} Nets")
-            self._status_bar.showMessage(f"Loaded DEF: {os.path.basename(filepath)}", 4000)
+            self._status_bar.showMessage(f"Loaded DEF: {def_base} ({inst_count:,} insts, {net_count:,} nets)", 5000)
+
+            self._viewer.fit()
+
         except Exception as e:
             QMessageBox.critical(self, "DEF Error", f"Failed to load DEF:\n{str(e)}")
+        finally:
+            progress.setValue(total_steps)
 
     def _open_lef_dialog(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -446,8 +510,28 @@ class MainWindow(QMainWindow):
             "",
             "LEF Files (*.lef *.tlef);;All Files (*)",
         )
-        for f in files:
-            self.load_lef(f)
+        if not files:
+            return
+
+        total = len(files)
+        progress = QProgressDialog("Loading LEF file(s)...", "Cancel", 0, total, self)
+        progress.setWindowTitle("Loading LEF Files")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        QApplication.processEvents()
+
+        try:
+            for idx, f in enumerate(files):
+                base = os.path.basename(f)
+                progress.setValue(idx)
+                progress.setLabelText(f"Parsing LEF [{idx + 1}/{total}]: {base}...")
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    break
+                self.load_lef(f, progress=progress)
+        finally:
+            progress.setValue(total)
 
     def _open_def_dialog(self) -> None:
         file, _ = QFileDialog.getOpenFileName(
