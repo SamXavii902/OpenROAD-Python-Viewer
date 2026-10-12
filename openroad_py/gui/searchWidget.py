@@ -87,7 +87,9 @@ class SearchResultItem:
             bbox = self.rect
             x_um = bbox.xMin() / float(self._dbu_per_um)
             y_um = bbox.yMin() / float(self._dbu_per_um)
-            self._detail = f"IO Pin | at ({x_um:,.1f}, {y_um:,.1f}) µm"
+            w_um = bbox.dx() / float(self._dbu_per_um)
+            h_um = bbox.dy() / float(self._dbu_per_um)
+            self._detail = f"IO Pin | at ({x_um:,.1f}, {y_um:,.1f}) µm | {w_um:,.2f}x{h_um:,.2f} µm"
         return self._detail
 
     @detail.setter
@@ -244,17 +246,16 @@ class SearchDock(QDockWidget):
         pin_count = 0
         for bterm in block.getBTerms():
             bbox = bterm.getBBox()
-            if bbox.dx() > 0 or bbox.dy() > 0:
-                pin_count += 1
-                self._cached_items.append(
-                    SearchResultItem(
-                        bterm.getName(),
-                        "PIN",
-                        rect=bbox,
-                        obj=bterm,
-                        dbu_per_um=self._dbu_per_um,
-                    )
+            pin_count += 1
+            self._cached_items.append(
+                SearchResultItem(
+                    bterm.getName(),
+                    "PIN",
+                    rect=bbox,
+                    obj=bterm,
+                    dbu_per_um=self._dbu_per_um,
                 )
+            )
 
         self._status_label.setText(
             f"Indexed {len(self._cached_items):,} objects ({macro_count} macros, {inst_count:,} cells, {net_count:,} nets, {pin_count} pins)"

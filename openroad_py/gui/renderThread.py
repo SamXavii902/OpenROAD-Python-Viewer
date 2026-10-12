@@ -606,8 +606,8 @@ class RenderThread(QThread):
                 break
             for bpin in bterm.getBPins():
                 for layer, box in bpin.getBoxes():
-                    if options.isVisible(layer) and box.intersects(bounds):
-                        color = options.color(layer)
+                    if (layer is None or options.isVisible(layer)) and box.intersects(bounds):
+                        color = options.color(layer) if layer else QColor(80, 220, 80)
                         painter.setPen(QPen(color, 0))
                         painter.setBrush(QBrush(color))
                         painter.drawRect(box.xMin(), box.yMin(), box.dx(), box.dy())

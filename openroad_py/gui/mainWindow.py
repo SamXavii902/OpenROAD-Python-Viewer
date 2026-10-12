@@ -3,7 +3,7 @@
 import sys
 import os
 import glob
-from typing import Optional, List
+from typing import Optional, List, Callable
 from PySide6.QtWidgets import (
     QMainWindow,
     QFileDialog,
@@ -323,14 +323,20 @@ class MainWindow(QMainWindow):
             step = 0
             for lf in valid_lefs:
                 step += 1
-                lef_pct = int(step * 15 / max(n_lefs, 1))
-                progress.setValue(lef_pct)
                 base = os.path.basename(lf)
-                progress.setLabelText(f"Parsing LEF [{step}/{n_lefs}]: {base}...")
-                QApplication.processEvents()
+
+                def on_lef_sub_progress(stage: str, cur: int, total: int, detail: str = "", sub_fraction: float = 0.0) -> None:
+                    lef_pct = int(((step - 1) + sub_fraction) * 15 / max(n_lefs, 1))
+                    progress.setValue(min(lef_pct, 15))
+                    detail_str = f" ({detail})" if detail else ""
+                    progress.setLabelText(f"Parsing LEF [{step}/{n_lefs}]: {base}{detail_str}")
+                    QApplication.processEvents()
+                    if progress.wasCanceled():
+                        raise KeyboardInterrupt("Cancelled")
+
                 if progress.wasCanceled():
                     return
-                lef_parser.parse_file(lf)
+                lef_parser.parse_file(lf, callback=on_lef_sub_progress)
                 self._lef_files.append(lf)
 
             tech = self._db.getTech()
@@ -438,11 +444,16 @@ class MainWindow(QMainWindow):
         finally:
             progress.setValue(100)
 
-    def load_lef(self, filepath: str, progress: Optional[QProgressDialog] = None) -> None:
+    def load_lef(
+        self,
+        filepath: str,
+        progress: Optional[QProgressDialog] = None,
+        callback: Optional[Callable] = None,
+    ) -> None:
         base = os.path.basename(filepath)
         own_progress = False
         if progress is None:
-            progress = QProgressDialog(f"Parsing LEF: {base}...", None, 0, 1, self)
+            progress = QProgressDialog(f"Parsing LEF: {base}...", "Cancel", 0, 100, self)
             progress.setWindowTitle("Loading LEF File")
             progress.setWindowModality(Qt.WindowModal)
             progress.setMinimumDuration(0)
@@ -451,19 +462,33 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         try:
+            def on_lef_progress(stage: str, cur: int, total: int, detail: str = "", sub_fraction: float = 0.0) -> None:
+                if callback:
+                    callback(stage, cur, total, detail, sub_fraction)
+                elif own_progress and progress:
+                    pct = int(sub_fraction * 100)
+                    progress.setValue(min(pct, 99))
+                    detail_str = f" ({detail})" if detail else ""
+                    progress.setLabelText(f"Parsing LEF: {base}{detail_str}")
+                    QApplication.processEvents()
+                    if progress.wasCanceled():
+                        raise KeyboardInterrupt("Cancelled")
+
             parser = LefParser(self._db)
-            parser.parse_file(filepath)
+            parser.parse_file(filepath, callback=on_lef_progress)
             self._lef_files.append(filepath)
             tech = self._db.getTech()
             if tech:
                 self._viewer.getOptions().tech_init(tech)
             self._controls.refresh()
             self._status_bar.showMessage(f"Loaded LEF: {base}", 4000)
+        except KeyboardInterrupt:
+            self._status_bar.showMessage(f"LEF loading cancelled: {base}", 3000)
         except Exception as e:
             QMessageBox.critical(self, "LEF Error", f"Failed to load LEF:\n{str(e)}")
         finally:
             if own_progress and progress:
-                progress.setValue(1)
+                progress.setValue(100)
 
     def load_def(self, filepath: str) -> None:
         def_base = os.path.basename(filepath)
@@ -581,7 +606,7 @@ class MainWindow(QMainWindow):
             return
 
         total = len(files)
-        progress = QProgressDialog("Loading LEF file(s)...", "Cancel", 0, total, self)
+        progress = QProgressDialog("Loading LEF file(s)...", "Cancel", 0, 100, self)
         progress.setWindowTitle("Loading LEF Files")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
@@ -591,14 +616,23 @@ class MainWindow(QMainWindow):
         try:
             for idx, f in enumerate(files):
                 base = os.path.basename(f)
-                progress.setValue(idx)
-                progress.setLabelText(f"Parsing LEF [{idx + 1}/{total}]: {base}...")
-                QApplication.processEvents()
+
+                def on_sub_progress(stage: str, cur: int, total_b: int, detail: str = "", sub_fraction: float = 0.0) -> None:
+                    pct = int(((idx + sub_fraction) / total) * 100)
+                    progress.setValue(min(pct, 99))
+                    detail_str = f" ({detail})" if detail else ""
+                    progress.setLabelText(f"Parsing LEF [{idx + 1}/{total}]: {base}{detail_str}")
+                    QApplication.processEvents()
+                    if progress.wasCanceled():
+                        raise KeyboardInterrupt("Cancelled")
+
                 if progress.wasCanceled():
                     break
-                self.load_lef(f, progress=progress)
+                self.load_lef(f, progress=progress, callback=on_sub_progress)
+        except KeyboardInterrupt:
+            self._status_bar.showMessage("LEF loading cancelled by user", 3000)
         finally:
-            progress.setValue(total)
+            progress.setValue(100)
 
     def _open_def_dialog(self) -> None:
         file, _ = QFileDialog.getOpenFileName(

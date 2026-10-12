@@ -1,18 +1,20 @@
 """Fast stream tokenizer for LEF and DEF files."""
 
 import io
-from typing import Generator, Union
+from typing import Generator, Union, Optional, List
 
 
-def tokenize_stream(stream: io.TextIOBase) -> Generator[str, None, None]:
+def tokenize_stream(stream: io.TextIOBase, pos_holder: Optional[List[int]] = None) -> Generator[str, None, None]:
     """Yields whitespace-separated tokens from a stream, skipping '#' comments
-
     and preserving quoted strings. Tokens ending with ';' yield ';' as a separate token.
+    Optionally tracks bytes read in pos_holder[0].
     """
     in_quote = False
     quote_chars = []
 
     for line in stream:
+        if pos_holder is not None:
+            pos_holder[0] += len(line) + 1
         # Strip trailing newline
         line = line.rstrip("\r\n")
         idx = 0
@@ -70,11 +72,17 @@ def tokenize_stream(stream: io.TextIOBase) -> Generator[str, None, None]:
 class TokenReader:
     """Helper for reading tokens with peek, expect, and conversion methods."""
 
-    def __init__(self, token_gen: Generator[str, None, None]):
+    def __init__(self, token_gen: Generator[str, None, None], pos_holder: Optional[List[int]] = None):
         self._gen = token_gen
+        self._pos_holder = pos_holder
         self._peeked = None
+        self.token_count = 0
+
+    def get_bytes_read(self) -> int:
+        return self._pos_holder[0] if self._pos_holder else 0
 
     def next(self) -> str:
+        self.token_count += 1
         if self._peeked is not None:
             token = self._peeked
             self._peeked = None

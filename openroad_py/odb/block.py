@@ -80,6 +80,23 @@ class dbInst:
     def isPlaced(self) -> bool:
         return self._status not in (dbPlacementStatus.NONE, dbPlacementStatus.UNPLACED)
 
+    def getLocation(self) -> Point:
+        bbox = self.getBBox().getBox()
+        return Point(bbox.xMin(), bbox.yMin())
+
+    def setLocation(self, x: int, y: int) -> None:
+        """Sets lower-left position of the placed component, matching OpenROAD definComponent.cpp:
+        _cur_inst->setOrigin(dbdist(x) - bbox.xMin(), dbdist(y) - bbox.yMin())
+        """
+        master = self._master
+        if master is not None:
+            bbox = master.getPlacementBoundary()
+            t = dbTransform(self._orient)
+            transformed = t.apply(bbox)
+            self.setOrigin(x - transformed.xMin(), y - transformed.yMin())
+        else:
+            self.setOrigin(x, y)
+
     def getTransform(self) -> dbTransform:
         return dbTransform(self._orient, self._origin)
 
@@ -122,6 +139,8 @@ class dbBPin:
         self._boxes: List[Tuple[dbTechLayer, Rect]] = []
         self._polygons: List[Tuple[dbTechLayer, Polygon]] = []
         self._placement_status: dbPlacementStatus = dbPlacementStatus.PLACED
+        self._loc: Optional[Point] = None
+        self._orient: dbOrientType = dbOrientType.R0
 
     def addBox(self, layer: dbTechLayer, box: Rect) -> None:
         self._boxes.append((layer, box))
@@ -140,6 +159,21 @@ class dbBPin:
 
     def setPlacementStatus(self, status: dbPlacementStatus) -> None:
         self._placement_status = status
+
+    def setLoc(self, pt: Point) -> None:
+        self._loc = pt
+
+    def getLoc(self) -> Optional[Point]:
+        return self._loc
+
+    def hasLoc(self) -> bool:
+        return self._loc is not None
+
+    def setOrient(self, orient: dbOrientType) -> None:
+        self._orient = orient
+
+    def getOrient(self) -> dbOrientType:
+        return self._orient
 
 
 class dbBTerm:
@@ -174,12 +208,26 @@ class dbBTerm:
         self._net = net
 
     def getBBox(self) -> Rect:
-        bbox = Rect(0, 0, 0, 0)
+        bbox: Optional[Rect] = None
         for bpin in self._bpins:
             for _, box in bpin.getBoxes():
-                bbox.merge(box)
+                if bbox is None:
+                    bbox = Rect(box.xMin(), box.yMin(), box.xMax(), box.yMax())
+                else:
+                    bbox.merge(box)
             for _, poly in bpin.getPolygons():
-                bbox.merge(poly.getEnclosingRect())
+                er = poly.getEnclosingRect()
+                if bbox is None:
+                    bbox = Rect(er.xMin(), er.yMin(), er.xMax(), er.yMax())
+                else:
+                    bbox.merge(er)
+        if bbox is None:
+            for bpin in self._bpins:
+                if bpin.hasLoc():
+                    loc = bpin.getLoc()
+                    d = 140  # 0.14um nominal pin half-width
+                    return Rect(loc.x - d, loc.y - d, loc.x + d, loc.y + d)
+            return Rect(0, 0, 0, 0)
         return bbox
 
     def getBoxes(self):

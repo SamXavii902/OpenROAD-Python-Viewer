@@ -27,6 +27,7 @@ from openroad_py.odb.block import (
     RouteShape,
 )
 from openroad_py.odb.database import dbDatabase, dbChip
+from openroad_py.odb.transform import dbTransform
 
 
 class DefParser:
@@ -338,9 +339,10 @@ class DefParser:
                         if idx + 4 < len(tokens) and tokens[idx + 1] == "(":
                             x = int(tokens[idx + 2])
                             y = int(tokens[idx + 3])
-                            inst.setOrigin(x, y)
                             orient_str = tokens[idx + 5]
-                            inst.setOrient(dbOrientType.from_str(orient_str))
+                            orient = dbOrientType.from_str(orient_str)
+                            inst.setOrient(orient)
+                            inst.setLocation(x, y)
                             idx += 6
                         else:
                             idx += 1
@@ -383,19 +385,59 @@ class DefParser:
                     self._notify_progress("Pins", pin_idx, total_count)
                 pin_name = reader.next()
                 bterm = dbBTerm(self._block, pin_name)
-                bpin = dbBPin()
-                bterm.addBPin(bpin)
 
                 tokens = reader.read_until_semicolon()
                 idx = 0
+
+                curr_bpin = dbBPin()
+                bterm.addBPin(curr_bpin)
+
                 curr_layer = None
+                orig_x = 0
+                orig_y = 0
+                orient = dbOrientType.R0
+                status = dbPlacementStatus.UNPLACED
+                has_placement = False
+                pending_rects: List[Tuple[Optional[dbTechLayer], Rect]] = []
+
+                def flush_port(bpin: dbBPin):
+                    nonlocal orig_x, orig_y, orient, status, has_placement, pending_rects, curr_layer
+                    xfm = dbTransform(orient)
+                    if pending_rects:
+                        for lyr, r in pending_rects:
+                            placed_r = xfm.apply(r)
+                            xmin = placed_r.xMin() + orig_x
+                            ymin = placed_r.yMin() + orig_y
+                            xmax = placed_r.xMax() + orig_x
+                            ymax = placed_r.yMax() + orig_y
+                            bpin.addBox(lyr, Rect(xmin, ymin, xmax, ymax))
+                    elif has_placement:
+                        d = 140
+                        bpin.addBox(curr_layer, Rect(orig_x - d, orig_y - d, orig_x + d, orig_y + d))
+                    bpin.setPlacementStatus(status)
+                    if has_placement:
+                        bpin.setLoc(Point(orig_x, orig_y))
+                        bpin.setOrient(orient)
+                    pending_rects = []
 
                 while idx < len(tokens):
                     t = tokens[idx].upper()
                     if t == "+":
                         idx += 1
                         continue
-                    if t == "DIRECTION":
+                    if t == "PORT":
+                        flush_port(curr_bpin)
+                        curr_bpin = dbBPin()
+                        bterm.addBPin(curr_bpin)
+                        has_placement = False
+                        idx += 1
+                    elif t == "NET":
+                        net_name = tokens[idx + 1]
+                        net = self._block.findNet(net_name)
+                        if net is not None:
+                            bterm.setNet(net)
+                        idx += 2
+                    elif t == "DIRECTION":
                         dir_str = tokens[idx + 1].upper()
                         idx += 2
                     elif t == "USE":
@@ -422,26 +464,31 @@ class DefParser:
                             y1 = int(round(float(tokens[idx + 2])))
                             x2 = int(round(float(tokens[idx + 5])))
                             y2 = int(round(float(tokens[idx + 6])))
-                            bpin.addBox(curr_layer, Rect(x1, y1, x2, y2))
+                            pending_rects.append((curr_layer, Rect(x1, y1, x2, y2)))
                             idx += 8
                     elif t in ("PLACED", "FIXED", "COVER"):
+                        status = (
+                            dbPlacementStatus.FIXED
+                            if t == "FIXED"
+                            else (dbPlacementStatus.COVER if t == "COVER" else dbPlacementStatus.PLACED)
+                        )
                         # ( x y ) orient
                         if idx + 4 < len(tokens) and tokens[idx + 1] == "(":
-                            x = int(round(float(tokens[idx + 2])))
-                            y = int(round(float(tokens[idx + 3])))
+                            orig_x = int(round(float(tokens[idx + 2])))
+                            orig_y = int(round(float(tokens[idx + 3])))
                             orient_str = tokens[idx + 5]
-                            # Update existing box with placement offset
-                            if bpin.getBoxes():
-                                new_boxes = []
-                                for l, box in bpin.getBoxes():
-                                    new_boxes.append((l, Rect(box.xMin() + x, box.yMin() + y, box.xMax() + x, box.yMax() + y)))
-                                bpin._boxes = new_boxes
+                            orient = dbOrientType.from_str(orient_str)
+                            has_placement = True
                             idx += 6
                         else:
                             idx += 1
+                    elif t == "UNPLACED":
+                        status = dbPlacementStatus.UNPLACED
+                        idx += 1
                     else:
                         idx += 1
 
+                flush_port(curr_bpin)
                 self._block.addBTerm(bterm)
 
         self._notify_progress("Pins", pin_idx, total_count)

@@ -195,3 +195,118 @@ END DESIGN
     assert "Signal Nets" in stage_names
 
 
+def test_macro_orientations_bbox(tmp_path):
+    """Verify that macros placed with N (R0), FN (MY), FS (MX), and S (R180) are positioned correctly
+
+    such that their bounding boxes span [x, x + W] and [y, y + H], matching OpenROAD definComponent.cpp.
+    """
+    lef_content = """VERSION 5.8 ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+MACRO SRAM_2K
+  CLASS BLOCK ;
+  ORIGIN 0.0 0.0 ;
+  SIZE 20.0 BY 30.0 ;
+END SRAM_2K
+END LIBRARY
+"""
+    def_content = """VERSION 5.8 ;
+DESIGN orient_test ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 100000 100000 ) ;
+COMPONENTS 4 ;
+- m_r0 SRAM_2K + PLACED ( 10000 10000 ) N ;
+- m_my SRAM_2K + PLACED ( 40000 10000 ) FN ;
+- m_mx SRAM_2K + PLACED ( 10000 50000 ) FS ;
+- m_r180 SRAM_2K + PLACED ( 40000 50000 ) S ;
+END COMPONENTS
+END DESIGN
+"""
+    lef_file = tmp_path / "macro.lef"
+    def_file = tmp_path / "test.def"
+    lef_file.write_text(lef_content)
+    def_file.write_text(def_content)
+
+    db = dbDatabase()
+    lp = LefParser(db)
+    lp.parse_file(str(lef_file))
+    dp = DefParser(db)
+    block = dp.parse_file(str(def_file))
+
+    # W = 20,000 DBU, H = 30,000 DBU
+    # m_r0: [10000, 30000] x [10000, 40000]
+    m_r0 = block.findInst("m_r0")
+    b0 = m_r0.getBBox().getBox()
+    assert b0.xMin() == 10000 and b0.xMax() == 30000
+    assert b0.yMin() == 10000 and b0.yMax() == 40000
+    assert m_r0.getLocation().x == 10000 and m_r0.getLocation().y == 10000
+
+    # m_my (mirrored across Y): must still span [40000, 60000] x [10000, 40000], NOT jump outside to [20000, 40000]!
+    m_my = block.findInst("m_my")
+    b_my = m_my.getBBox().getBox()
+    assert b_my.xMin() == 40000 and b_my.xMax() == 60000
+    assert b_my.yMin() == 10000 and b_my.yMax() == 40000
+    assert m_my.getLocation().x == 40000 and m_my.getLocation().y == 10000
+
+    # m_mx (mirrored across X): must still span [10000, 30000] x [50000, 80000], NOT jump outside downwards to [20000, 50000]!
+    m_mx = block.findInst("m_mx")
+    b_mx = m_mx.getBBox().getBox()
+    assert b_mx.xMin() == 10000 and b_mx.xMax() == 30000
+    assert b_mx.yMin() == 50000 and b_mx.yMax() == 80000
+    assert m_mx.getLocation().x == 10000 and m_mx.getLocation().y == 50000
+
+    # m_r180: must still span [40000, 60000] x [50000, 80000]
+    m_r180 = block.findInst("m_r180")
+    b_r180 = m_r180.getBBox().getBox()
+    assert b_r180.xMin() == 40000 and b_r180.xMax() == 60000
+    assert b_r180.yMin() == 50000 and b_r180.yMax() == 80000
+    assert m_r180.getLocation().x == 40000 and m_r180.getLocation().y == 50000
+
+
+def test_io_pins_placement_and_bbox(tmp_path):
+    """Verify that IO pins have non-zero coordinates matching DEF placement,
+
+    and do not default to (0, 0) or produce gigantic bounding boxes.
+    """
+    def_content = """VERSION 5.8 ;
+DESIGN pin_test ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 100000 100000 ) ;
+PINS 2 ;
+- pin_placed_first + NET clk + DIRECTION INPUT + PLACED ( 25000 50000 ) N + LAYER metal3 ( -140 -140 ) ( 140 140 ) ;
+- pin_layer_first + NET rst + DIRECTION INPUT + LAYER metal3 ( -100 -200 ) ( 100 200 ) + FIXED ( 75000 80000 ) N ;
+END PINS
+END DESIGN
+"""
+    def_file = tmp_path / "pin_test.def"
+    def_file.write_text(def_content)
+
+    db = dbDatabase()
+    dp = DefParser(db)
+    block = dp.parse_file(str(def_file))
+
+    p1 = block.findBTerm("pin_placed_first")
+    assert p1 is not None
+    box1 = p1.getBBox()
+    # Should be centered at 25000, 50000 with width 280, height 280
+    assert box1.xMin() == 25000 - 140
+    assert box1.xMax() == 25000 + 140
+    assert box1.yMin() == 50000 - 140
+    assert box1.yMax() == 50000 + 140
+    assert box1.dx() == 280
+    assert box1.dy() == 280
+
+    p2 = block.findBTerm("pin_layer_first")
+    assert p2 is not None
+    box2 = p2.getBBox()
+    # Should be centered at 75000, 80000 with width 200, height 400
+    assert box2.xMin() == 75000 - 100
+    assert box2.xMax() == 75000 + 100
+    assert box2.yMin() == 80000 - 200
+    assert box2.yMax() == 80000 + 200
+    assert box2.dx() == 200
+    assert box2.dy() == 400
+
+
+

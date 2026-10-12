@@ -1,7 +1,7 @@
 """LEF file parser ported from OpenROAD odb/src/lefin/lefin.cpp."""
 
 import os
-from typing import Optional, Union, List, Tuple
+from typing import Optional, Union, List, Tuple, Callable
 from openroad_py.lefin.tokenizer import tokenize_stream, TokenReader
 from openroad_py.odb.geom import Rect, Polygon, Point
 from openroad_py.odb.types import (
@@ -112,8 +112,8 @@ class LefParser:
     def dbu(self, val: float) -> int:
         return round(float(val) * self._dbu)
 
-    def parse_file(self, filepath: str) -> None:
-        """Parses a LEF file from path."""
+    def parse_file(self, filepath: str, callback: Optional[Callable] = None) -> None:
+        """Parses a LEF file from path with optional progress callback."""
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"LEF file not found: {filepath}")
 
@@ -131,15 +131,39 @@ class LefParser:
         lib_name = os.path.splitext(os.path.basename(filepath))[0]
         self._lib = dbLib(lib_name)
         self._db.addLib(self._lib)
+        self._callback = callback
+        self._file_size = max(os.path.getsize(filepath), 1)
+        pos_holder = [0]
 
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-            reader = TokenReader(tokenize_stream(f))
+            reader = TokenReader(tokenize_stream(f, pos_holder=pos_holder), pos_holder=pos_holder)
             self._parse_top(reader)
 
+        self._notify_progress("LEF", self._file_size, self._file_size, f"Completed {lib_name}", sub_fraction=1.0)
+
+    def _notify_progress(self, stage: str, cur: int, total: int, detail: str = "", sub_fraction: float = 0.0) -> None:
+        if not self._callback:
+            return
+        try:
+            self._callback(stage, cur, total, detail=detail, sub_fraction=sub_fraction)
+        except TypeError:
+            try:
+                self._callback(stage, cur, total, detail)
+            except TypeError:
+                self._callback(stage, cur, total)
+
     def _parse_top(self, reader: TokenReader) -> None:
+        last_token_notify = 0
         while reader.has_next():
             tok = reader.next()
             u = tok.upper()
+
+            # Periodically notify progress so UI stays responsive on large LEFs
+            if reader.token_count - last_token_notify >= 600:
+                last_token_notify = reader.token_count
+                cur_bytes = reader.get_bytes_read()
+                frac = min(cur_bytes / self._file_size, 0.99)
+                self._notify_progress("LEF", cur_bytes, self._file_size, f"{u}", sub_fraction=frac)
 
             if u == "UNITS":
                 self._parse_units(reader)
@@ -149,12 +173,22 @@ class LefParser:
                     reader.next()
                 self._tech.setManufacturingGrid(round(grid_val * self._dbu))
             elif u == "LAYER":
+                cur_bytes = reader.get_bytes_read()
+                frac = min(cur_bytes / self._file_size, 0.99)
+                self._notify_progress("LEF", cur_bytes, self._file_size, f"Layer: {reader.peek()}", sub_fraction=frac)
                 self._parse_layer(reader)
             elif u == "VIA":
+                cur_bytes = reader.get_bytes_read()
+                frac = min(cur_bytes / self._file_size, 0.99)
+                self._notify_progress("LEF", cur_bytes, self._file_size, f"Via: {reader.peek()}", sub_fraction=frac)
                 self._parse_via(reader)
             elif u == "SITE":
                 self._parse_site(reader)
             elif u == "MACRO":
+                cur_bytes = reader.get_bytes_read()
+                frac = min(cur_bytes / self._file_size, 0.99)
+                macro_peek = reader.peek()
+                self._notify_progress("LEF", cur_bytes, self._file_size, f"Macro: {macro_peek}", sub_fraction=frac)
                 self._parse_macro(reader)
             elif u == "PROPERTYDEFINITIONS":
                 self._skip_section(reader, "PROPERTYDEFINITIONS")
