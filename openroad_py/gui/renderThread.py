@@ -609,40 +609,20 @@ class RenderThread(QThread):
         die_rect = block.getDieArea()
         if die_rect.area() <= 0:
             die_rect = block.getBBox()
+        if die_rect.area() <= 0:
+            return
 
         ppd = self._viewer.pixels_per_dbu
-        scale_adjust = 1.0 / ppd if ppd > 0 else 1.0
+        if ppd <= 0:
+            return
+        scale_adjust = 1.0 / ppd
 
-        die_max_dim = min(die_rect.maxDXDY(), bounds.maxDXDY()) if (bounds and bounds.area() > 0) else die_rect.maxDXDY()
-        if die_max_dim <= 0:
-            die_max_dim = 100000
+        die_w = max(die_rect.dx(), 1)
+        die_h = max(die_rect.dy(), 1)
 
-        scale_factor = 0.02
-        pin_max_size = scale_factor * die_max_dim
-        abs_min_size = 8.0 / ppd if ppd > 0 else 8.0
-        pin_max_size = max(pin_max_size, abs_min_size)
-        max_px_size = 28.0 / ppd if ppd > 0 else pin_max_size
-        pin_max_size = min(pin_max_size, max_px_size)
-
-        w = max(int(pin_max_size // 4), 1)
-        h = max(int(pin_max_size), 2)
-
-        in_marker = [
-            Point(w, h),
-            Point(0, 0),
-            Point(-w, h),
-        ]
-        out_marker = [
-            Point(0, h),
-            Point(-w, 0),
-            Point(w, 0),
-        ]
-        bi_marker = [
-            Point(0, 0),
-            Point(-w, h // 2),
-            Point(0, h),
-            Point(w, h // 2),
-        ]
+        # Compact, crisp EDA marker dimensions in screen pixels (10px long, 4px half-width)
+        marker_h = max(int(10.0 * scale_adjust), 2)
+        marker_w = max(int(4.0 * scale_adjust), 1)
 
         pin_color = options.ioPinColor()
         marker_pen = QPen(pin_color.darker(140), 1)
@@ -653,30 +633,53 @@ class RenderThread(QThread):
         box_pen.setCosmetic(True)
         box_brush = QBrush(pin_color)
 
-        draw_names = options.areIOPinNamesVisible() and (pin_max_size * ppd >= 14)
-        if draw_names:
-            font_pin = QFont("Segoe UI", 7, QFont.Bold)
-            fm_pin = QFontMetrics(font_pin)
+        # Standard cell name matching algorithm:
+        # Hide names when zoomed out (nominalViewableResolution > 1800 DBU), identical to standard cells
+        min_size = self._viewer.nominalViewableResolution()
+        show_names = (
+            (options.areInstanceNamesVisible() or options.areIOPinNamesVisible())
+            and min_size <= 1800
+        )
+        if show_names:
+            font_cell = QFont("Segoe UI", 8)
+            fm_cell = QFontMetrics(font_cell)
 
         for bterm in block.getBTerms():
             if self._restart:
                 break
 
             io_type = bterm.getIoType()
-            if io_type == dbIoType.INPUT:
-                template = in_marker
-            elif io_type == dbIoType.OUTPUT:
-                template = out_marker
-            elif io_type == dbIoType.INOUT:
-                template = bi_marker
-            else:
-                lname = bterm.getName().lower()
-                if lname.startswith("in_") or lname.startswith("i_") or lname.endswith("_in"):
-                    template = in_marker
-                elif lname.startswith("out_") or lname.startswith("o_") or lname.endswith("_out"):
-                    template = out_marker
-                else:
-                    template = bi_marker
+            lname = bterm.getName().lower()
+            is_input = (
+                io_type == dbIoType.INPUT
+                or (
+                    io_type == dbIoType.INOUT
+                    and (
+                        lname.startswith("in_")
+                        or lname.startswith("i_")
+                        or lname.endswith("_in")
+                        or lname.endswith("_i")
+                        or "clk" in lname
+                        or "rst" in lname
+                        or "reset" in lname
+                        or lname.startswith("req_")
+                    )
+                )
+            )
+            is_output = (
+                io_type == dbIoType.OUTPUT
+                or (
+                    io_type == dbIoType.INOUT
+                    and not is_input
+                    and (
+                        lname.startswith("out_")
+                        or lname.startswith("o_")
+                        or lname.endswith("_out")
+                        or lname.endswith("_o")
+                        or lname.startswith("resp_")
+                    )
+                )
+            )
 
             for bpin in bterm.getBPins():
                 if self._restart:
@@ -689,79 +692,167 @@ class RenderThread(QThread):
                     boxes = [(None, Rect(loc.x - d, loc.y - d, loc.x + d, loc.y + d))]
 
                 for layer, box in boxes:
+                    # Ignore unplaced or empty boxes
+                    if box.area() <= 0:
+                        continue
+
                     # Check visibility against query bounds (with margin for marker)
-                    expand_m = int(pin_max_size * 1.5)
-                    query_box = Rect(box.xMin() - expand_m, box.yMin() - expand_m, box.xMax() + expand_m, box.yMax() + expand_m)
+                    expand_m = int(marker_h * 2)
+                    query_box = Rect(
+                        box.xMin() - expand_m,
+                        box.yMin() - expand_m,
+                        box.xMax() + expand_m,
+                        box.yMax() + expand_m,
+                    )
                     if not query_box.intersects(bounds):
                         continue
 
-                    pin_center = Point((box.xMin() + box.xMax()) // 2, (box.yMin() + box.yMax()) // 2)
+                    pin_center = Point(
+                        (box.xMin() + box.xMax()) // 2,
+                        (box.yMin() + box.yMax()) // 2,
+                    )
+                    cx, cy = pin_center.x, pin_center.y
 
-                    # Compute closest edge of die boundary
-                    dist_to_left = abs(box.xMin() - die_rect.xMin())
-                    dist_to_right = abs(box.xMax() - die_rect.xMax())
-                    dist_to_top = abs(box.yMax() - die_rect.yMax())
-                    dist_to_bot = abs(box.yMin() - die_rect.yMin())
-                    dists = [dist_to_left, dist_to_right, dist_to_top, dist_to_bot]
-                    min_dist = min(dists)
-                    arg_min = dists.index(min_dist)
+                    # Compute normalized distances to the 4 boundaries
+                    d_left = abs(box.xMin() - die_rect.xMin())
+                    d_right = abs(box.xMax() - die_rect.xMax())
+                    d_bot = abs(box.yMin() - die_rect.yMin())
+                    d_top = abs(box.yMax() - die_rect.yMax())
 
-                    if arg_min == 0:  # Left edge
-                        orient = dbOrientType.R90
-                        offset_x = die_rect.xMin() if dist_to_left <= pin_max_size * 2 else pin_center.x
-                        offset = Point(offset_x, pin_center.y)
-                    elif arg_min == 1:  # Right edge
-                        orient = dbOrientType.R270
-                        offset_x = die_rect.xMax() if dist_to_right <= pin_max_size * 2 else pin_center.x
-                        offset = Point(offset_x, pin_center.y)
-                    elif arg_min == 2:  # Top edge
-                        orient = dbOrientType.R0
-                        offset_y = die_rect.yMax() if dist_to_top <= pin_max_size * 2 else pin_center.y
-                        offset = Point(pin_center.x, offset_y)
-                    else:  # Bottom edge
-                        orient = dbOrientType.MX
-                        offset_y = die_rect.yMin() if dist_to_bot <= pin_max_size * 2 else pin_center.y
-                        offset = Point(pin_center.x, offset_y)
+                    is_vert = box.dy() > box.dx()
+                    is_horiz = box.dx() > box.dy()
 
-                    xfm = dbTransform(orient, offset)
+                    nd_left = d_left / float(die_w)
+                    nd_right = d_right / float(die_w)
+                    nd_top = d_top / float(die_h)
+                    nd_bot = d_bot / float(die_h)
+
+                    # Bias by track geometry to prevent corner misclassification
+                    if is_vert:
+                        nd_left += 0.5
+                        nd_right += 0.5
+                    elif is_horiz:
+                        nd_top += 0.5
+                        nd_bot += 0.5
+
+                    ndists = [nd_left, nd_right, nd_top, nd_bot]
+                    arg_min = ndists.index(min(ndists))
+
+                    # Construct exact directional marker polygon
                     qpoly = QPolygonF()
-                    for pt in template:
-                        tpt = xfm.apply_to_point(pt)
-                        qpoly.append(QPointF(tpt.x, tpt.y))
+                    bx, by = cx, cy
 
-                    # 1. Draw marker polygon (directional indicator)
+                    if arg_min == 3:  # Bottom edge
+                        by = die_rect.yMin() if d_bot <= marker_h * 4 else cy
+                        if is_input:
+                            # Arrow points UP into core
+                            qpoly.append(QPointF(cx, by))
+                            qpoly.append(QPointF(cx - marker_w, by - marker_h))
+                            qpoly.append(QPointF(cx + marker_w, by - marker_h))
+                        elif is_output:
+                            # Arrow points DOWN out of core
+                            qpoly.append(QPointF(cx, by - marker_h))
+                            qpoly.append(QPointF(cx - marker_w, by))
+                            qpoly.append(QPointF(cx + marker_w, by))
+                        else:
+                            # Diamond
+                            qpoly.append(QPointF(cx, by))
+                            qpoly.append(QPointF(cx - marker_w, by - marker_h // 2))
+                            qpoly.append(QPointF(cx, by - marker_h))
+                            qpoly.append(QPointF(cx + marker_w, by - marker_h // 2))
+
+                    elif arg_min == 2:  # Top edge
+                        by = die_rect.yMax() if d_top <= marker_h * 4 else cy
+                        if is_input:
+                            # Arrow points DOWN into core
+                            qpoly.append(QPointF(cx, by))
+                            qpoly.append(QPointF(cx - marker_w, by + marker_h))
+                            qpoly.append(QPointF(cx + marker_w, by + marker_h))
+                        elif is_output:
+                            # Arrow points UP out of core
+                            qpoly.append(QPointF(cx, by + marker_h))
+                            qpoly.append(QPointF(cx - marker_w, by))
+                            qpoly.append(QPointF(cx + marker_w, by))
+                        else:
+                            # Diamond
+                            qpoly.append(QPointF(cx, by))
+                            qpoly.append(QPointF(cx - marker_w, by + marker_h // 2))
+                            qpoly.append(QPointF(cx, by + marker_h))
+                            qpoly.append(QPointF(cx + marker_w, by + marker_h // 2))
+
+                    elif arg_min == 0:  # Left edge
+                        bx = die_rect.xMin() if d_left <= marker_h * 4 else cx
+                        if is_input:
+                            # Arrow points RIGHT into core
+                            qpoly.append(QPointF(bx, cy))
+                            qpoly.append(QPointF(bx - marker_h, cy - marker_w))
+                            qpoly.append(QPointF(bx - marker_h, cy + marker_w))
+                        elif is_output:
+                            # Arrow points LEFT out of core
+                            qpoly.append(QPointF(bx - marker_h, cy))
+                            qpoly.append(QPointF(bx, cy - marker_w))
+                            qpoly.append(QPointF(bx, cy + marker_w))
+                        else:
+                            # Diamond
+                            qpoly.append(QPointF(bx, cy))
+                            qpoly.append(QPointF(bx - marker_h // 2, cy - marker_w))
+                            qpoly.append(QPointF(bx - marker_h, cy))
+                            qpoly.append(QPointF(bx - marker_h // 2, cy + marker_w))
+
+                    else:  # Right edge
+                        bx = die_rect.xMax() if d_right <= marker_h * 4 else cx
+                        if is_input:
+                            # Arrow points LEFT into core
+                            qpoly.append(QPointF(bx, cy))
+                            qpoly.append(QPointF(bx + marker_h, cy - marker_w))
+                            qpoly.append(QPointF(bx + marker_h, cy + marker_w))
+                        elif is_output:
+                            # Arrow points RIGHT out of core
+                            qpoly.append(QPointF(bx + marker_h, cy))
+                            qpoly.append(QPointF(bx, cy - marker_w))
+                            qpoly.append(QPointF(bx, cy + marker_w))
+                        else:
+                            # Diamond
+                            qpoly.append(QPointF(bx, cy))
+                            qpoly.append(QPointF(bx + marker_h // 2, cy - marker_w))
+                            qpoly.append(QPointF(bx + marker_h, cy))
+                            qpoly.append(QPointF(bx + marker_h // 2, cy + marker_w))
+
+                    # 1. Draw marker polygon
                     painter.setPen(marker_pen)
                     painter.setBrush(marker_brush)
                     painter.drawPolygon(qpoly)
 
-                    # 2. Draw physical pin geometry
-                    painter.setPen(box_pen)
-                    painter.setBrush(box_brush)
-                    painter.drawRect(box.xMin(), box.yMin(), box.dx(), box.dy())
+                    # 2. Draw physical pin geometry (clamp to prevent huge power rails)
+                    if box.dx() < die_w * 0.1 and box.dy() < die_h * 0.1:
+                        painter.setPen(box_pen)
+                        painter.setBrush(box_brush)
+                        painter.drawRect(box.xMin(), box.yMin(), box.dx(), box.dy())
 
-                    # 3. Draw pin name if zoomed in
-                    if draw_names:
+                    # 3. Draw pin name (same algorithm and font as standard cell names)
+                    if show_names:
                         name = bterm.getName()
+                        tw = fm_cell.horizontalAdvance(name)
+                        th = fm_cell.height()
                         painter.save()
-                        painter.setFont(font_pin)
-                        painter.setPen(QPen(QColor(240, 255, 240), 0))
-                        tw = fm_pin.horizontalAdvance(name)
-                        th = fm_pin.height()
-                        tx, ty = offset.x, offset.y
+                        painter.setFont(font_cell)
+                        painter.setPen(QPen(options.instanceNameColor(), 0))
+                        gap = int(4.0 * scale_adjust)
+
                         if arg_min == 0:  # Left
-                            painter.translate(tx - int(pin_max_size + 4 / ppd), ty)
+                            painter.translate(bx - marker_h - gap, cy)
                             painter.scale(scale_adjust, -scale_adjust)
                             painter.drawText(-tw, th // 3, name)
                         elif arg_min == 1:  # Right
-                            painter.translate(tx + int(pin_max_size + 4 / ppd), ty)
+                            painter.translate(bx + marker_h + gap, cy)
                             painter.scale(scale_adjust, -scale_adjust)
                             painter.drawText(0, th // 3, name)
                         elif arg_min == 2:  # Top
-                            painter.translate(tx, ty + int(pin_max_size + 4 / ppd))
+                            painter.translate(cx, by + marker_h + gap)
                             painter.scale(scale_adjust, -scale_adjust)
                             painter.drawText(-tw // 2, th, name)
                         else:  # Bottom
-                            painter.translate(tx, ty - int(pin_max_size + 4 / ppd))
+                            painter.translate(cx, by - marker_h - gap)
                             painter.scale(scale_adjust, -scale_adjust)
                             painter.drawText(-tw // 2, 0, name)
                         painter.restore()

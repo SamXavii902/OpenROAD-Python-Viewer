@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QImage
 from PySide6.QtCore import QRect
 from openroad_py.odb.database import dbDatabase
+from openroad_py.odb.geom import Rect
 from openroad_py.lefin import LefParser
 from openroad_py.defin import DefParser
 from openroad_py.gui.layoutViewer import LayoutViewer
@@ -165,5 +166,43 @@ def test_viewer_renders_iopins_with_layers_off(qapp):
             break
 
     assert not found_pin_pixels_when_off, "IO pins should not be drawn when toggled off"
+    viewer.close()
+
+
+def test_viewer_iopin_names_zoom_threshold(qapp):
+    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_tech.lef"
+    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_stdcell.lef"
+    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\src\odb\test\data\gcd\gcd_nangate45_route.def"
+
+    db = dbDatabase()
+    lef_parser = LefParser(db)
+    lef_parser.parse_file(lef_path1)
+    lef_parser.parse_file(lef_path2)
+
+    def_parser = DefParser(db)
+    block = def_parser.parse_file(def_path)
+    chip = db.getChip()
+
+    viewer = LayoutViewer()
+    viewer.resize(800, 600)
+    viewer.setChip(chip)
+    viewer.fit()
+
+    options = viewer.getOptions()
+    options.setIOPinsVisible(True)
+    options.setIOPinNamesVisible(True)
+
+    # In default view, nominalViewableResolution is large (> 1800 DBU),
+    # so pin names should NOT be drawn, avoiding clutter.
+    assert viewer.nominalViewableResolution() > 1800, "Default full-chip view should have nominalViewableResolution > 1800"
+
+    # Zoom in to a pin on the bottom edge
+    viewer.zoomTo(Rect(44000, -1000, 45000, 1000))
+    assert viewer.nominalViewableResolution() <= 1800, "Zoomed-in view should enable pin name display"
+
+    test_image = QImage(800, 600, QImage.Format_ARGB32_Premultiplied)
+    draw_bounds = QRect(0, 0, 800, 600)
+    viewer._render_thread.draw(test_image, draw_bounds)
+    assert not test_image.isNull()
     viewer.close()
 
