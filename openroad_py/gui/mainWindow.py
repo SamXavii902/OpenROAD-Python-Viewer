@@ -344,21 +344,29 @@ class MainWindow(QMainWindow):
             if progress.wasCanceled():
                 return
 
-            def on_def_progress(stage: str, cur: int, total: int) -> None:
-                ratio = min(max(cur / max(total, 1), 0.0), 1.0)
+            def on_def_progress(stage: str, cur: int, total: int, detail: str = "", sub_fraction: float = 0.0) -> None:
                 if stage == "Components":
-                    mapped_pct = 15 + int(ratio * 30)
+                    ratio = min(max(cur / max(total, 1), 0.0), 1.0)
+                    mapped_pct = 15 + int(ratio * 28)  # 15% to 43%
                 elif stage == "Pins":
-                    mapped_pct = 45 + int(ratio * 3)
+                    ratio = min(max(cur / max(total, 1), 0.0), 1.0)
+                    mapped_pct = 43 + int(ratio * 3)   # 43% to 46%
                 elif stage == "Special Nets":
-                    mapped_pct = 48 + int(ratio * 4)
+                    effective_cur = max(cur - 1, 0) + sub_fraction if (cur > 0 or sub_fraction > 0) else float(cur)
+                    ratio = min(max(effective_cur / max(total, 1), 0.0), 1.0)
+                    mapped_pct = 46 + int(ratio * 7)   # 46% to 53%
                 elif stage == "Signal Nets":
-                    mapped_pct = 52 + int(ratio * 23)
+                    effective_cur = max(cur - 1, 0) + sub_fraction if sub_fraction > 0 else float(cur)
+                    ratio = min(max(effective_cur / max(total, 1), 0.0), 1.0)
+                    mapped_pct = 53 + int(ratio * 19)  # 53% to 72%
                 else:
-                    mapped_pct = 15 + int(ratio * 60)
+                    ratio = min(max(cur / max(total, 1), 0.0), 1.0)
+                    mapped_pct = 15 + int(ratio * 57)
 
                 progress.setValue(mapped_pct)
-                if total > 0:
+                if detail:
+                    progress.setLabelText(f"Parsing DEF: {def_base}\n{stage} [{cur:,}/{total:,}]: {detail}...")
+                elif total > 0:
                     pct = int(ratio * 100)
                     progress.setLabelText(f"Parsing DEF: {def_base}\n{stage}: {cur:,} / {total:,} ({pct}%)...")
                 else:
@@ -374,17 +382,29 @@ class MainWindow(QMainWindow):
 
             chip = self._db.getChip()
 
-            # 75% - 87%: Spatial Index
-            progress.setValue(76)
+            # 72% - 88%: Spatial Index with sub-stage progress
+            def on_spatial_progress(sub_stage: str, s_cur: int, s_tot: int) -> None:
+                s_ratio = min(max(s_cur / max(s_tot, 1), 0.0), 1.0)
+                if "Instance" in sub_stage:
+                    s_pct = 72 + int(s_ratio * 5)
+                elif "Routing" in sub_stage:
+                    s_pct = 77 + int(s_ratio * 6)
+                else:
+                    s_pct = 83 + int(s_ratio * 5)
+                progress.setValue(s_pct)
+                progress.setLabelText(f"Building spatial index...\n{sub_stage}: {s_cur:,} / {s_tot:,} ({int(s_ratio * 100)}%)...")
+                QApplication.processEvents()
+
+            progress.setValue(72)
             progress.setLabelText(f"Building spatial index ({len(block.getInsts()):,} instances)...")
             QApplication.processEvents()
-            self._viewer.setChip(chip)
-            progress.setValue(87)
+            self._viewer.setChip(chip, progress_callback=on_spatial_progress)
+            progress.setValue(88)
             QApplication.processEvents()
             if progress.wasCanceled():
                 return
 
-            # 87% - 92%: Layer Display Controls
+            # 88% - 92%: Layer Display Controls
             progress.setLabelText("Configuring layer display controls...")
             QApplication.processEvents()
             self._controls.refresh()
@@ -454,21 +474,29 @@ class MainWindow(QMainWindow):
         progress.setValue(0)
         QApplication.processEvents()
 
-        def on_def_progress(stage: str, cur: int, total: int) -> None:
-            ratio = min(max(cur / max(total, 1), 0.0), 1.0)
+        def on_def_progress(stage: str, cur: int, total: int, detail: str = "", sub_fraction: float = 0.0) -> None:
             if stage == "Components":
-                mapped_pct = int(ratio * 35)
+                ratio = min(max(cur / max(total, 1), 0.0), 1.0)
+                mapped_pct = int(ratio * 35)  # 0% to 35%
             elif stage == "Pins":
-                mapped_pct = 35 + int(ratio * 3)
+                ratio = min(max(cur / max(total, 1), 0.0), 1.0)
+                mapped_pct = 35 + int(ratio * 3)  # 35% to 38%
             elif stage == "Special Nets":
-                mapped_pct = 38 + int(ratio * 4)
+                effective_cur = max(cur - 1, 0) + sub_fraction if (cur > 0 or sub_fraction > 0) else float(cur)
+                ratio = min(max(effective_cur / max(total, 1), 0.0), 1.0)
+                mapped_pct = 38 + int(ratio * 8)  # 38% to 46%
             elif stage == "Signal Nets":
-                mapped_pct = 42 + int(ratio * 28)
+                effective_cur = max(cur - 1, 0) + sub_fraction if sub_fraction > 0 else float(cur)
+                ratio = min(max(effective_cur / max(total, 1), 0.0), 1.0)
+                mapped_pct = 46 + int(ratio * 24)  # 46% to 70%
             else:
+                ratio = min(max(cur / max(total, 1), 0.0), 1.0)
                 mapped_pct = int(ratio * 70)
 
             progress.setValue(mapped_pct)
-            if total > 0:
+            if detail:
+                progress.setLabelText(f"Parsing DEF: {def_base}\n{stage} [{cur:,}/{total:,}]: {detail}...")
+            elif total > 0:
                 pct = int(ratio * 100)
                 progress.setLabelText(f"Parsing DEF: {def_base}\n{stage}: {cur:,} / {total:,} ({pct}%)...")
             else:
@@ -487,22 +515,34 @@ class MainWindow(QMainWindow):
             self._def_file = filepath
             chip = self._db.getChip()
 
-            # 70% - 85%: Spatial Index
-            progress.setValue(72)
+            # 70% - 88%: Spatial Index with live sub-stage feedback
+            def on_spatial_progress(sub_stage: str, s_cur: int, s_tot: int) -> None:
+                s_ratio = min(max(s_cur / max(s_tot, 1), 0.0), 1.0)
+                if "Instance" in sub_stage:
+                    s_pct = 70 + int(s_ratio * 6)
+                elif "Routing" in sub_stage:
+                    s_pct = 76 + int(s_ratio * 7)
+                else:
+                    s_pct = 83 + int(s_ratio * 5)
+                progress.setValue(s_pct)
+                progress.setLabelText(f"Building spatial index...\n{sub_stage}: {s_cur:,} / {s_tot:,} ({int(s_ratio * 100)}%)...")
+                QApplication.processEvents()
+
             inst_count = len(block.getInsts())
+            progress.setValue(70)
             progress.setLabelText(f"Building spatial index ({inst_count:,} instances)...")
             QApplication.processEvents()
-            self._viewer.setChip(chip)
-            progress.setValue(85)
+            self._viewer.setChip(chip, progress_callback=on_spatial_progress)
+            progress.setValue(88)
             QApplication.processEvents()
             if progress.wasCanceled():
                 return
 
-            # 85% - 90%: Layer Controls
+            # 88% - 92%: Layer Controls
             progress.setLabelText("Configuring layer display controls...")
             QApplication.processEvents()
             self._controls.refresh()
-            progress.setValue(90)
+            progress.setValue(92)
             QApplication.processEvents()
 
             # 90% - 93%: Design Inspector

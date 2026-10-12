@@ -1,6 +1,6 @@
 """Spatial index implementation ported from OpenROAD gui/src/search.cpp."""
 
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Callable
 import numpy as np
 from openroad_py.odb.geom import Rect
 from openroad_py.odb.tech import dbTechLayer
@@ -43,16 +43,22 @@ class SpatialSearch:
         self._rows: List[dbRow] = []
         self._row_boxes: Optional[np.ndarray] = None
 
-    def build(self, block: dbBlock) -> None:
+    def build(self, block: dbBlock, callback: Optional[Callable[[str, int, int], None]] = None) -> None:
         """Indexes all block objects for fast viewport querying."""
         self._block = block
         self._insts = list(block.getInsts())
+        n_insts = len(self._insts)
+
+        if callback:
+            callback("Instances", 0, max(n_insts, 1))
 
         # Index instances
         if self._insts:
             boxes = []
             is_macro_list = []
-            for inst in self._insts:
+            for idx, inst in enumerate(self._insts):
+                if callback and idx > 0 and idx % 20000 == 0:
+                    callback("Instances", idx, n_insts)
                 bbox = inst.getBBox().getBox()
                 boxes.append([bbox.xMin(), bbox.yMin(), bbox.xMax(), bbox.yMax()])
                 master = inst.getMaster()
@@ -76,12 +82,23 @@ class SpatialSearch:
             self._inst_is_macro = np.empty((0,), dtype=bool)
             self._inst_sizes = np.empty((0,), dtype=np.int32)
 
+        if callback:
+            callback("Instances", n_insts, max(n_insts, 1))
+
         # Per-layer routing shapes: [x1, y1, x2, y2, is_via, shape_idx]
         self._route_shapes_by_layer.clear()
         self._route_boxes_by_layer.clear()
         self._route_sizes_by_layer: Dict[str, np.ndarray] = {}
         layer_shapes: Dict[str, List[RouteShape]] = {}
-        for net in block.getNets():
+
+        nets = list(block.getNets())
+        n_nets = len(nets)
+        if callback:
+            callback("Routing Nets", 0, max(n_nets, 1))
+
+        for idx, net in enumerate(nets):
+            if callback and idx > 0 and idx % 20000 == 0:
+                callback("Routing Nets", idx, n_nets)
             for shape in net.getWireShapes():
                 lname = shape.layer.getName().upper()
                 layer_shapes.setdefault(lname, []).append(shape)
@@ -89,12 +106,21 @@ class SpatialSearch:
                 lname = shape.layer.getName().upper()
                 layer_shapes.setdefault(lname, []).append(shape)
 
-        for lname, shapes in layer_shapes.items():
+        if callback:
+            callback("Routing Nets", n_nets, max(n_nets, 1))
+
+        n_layers = len(layer_shapes)
+        for l_idx, (lname, shapes) in enumerate(layer_shapes.items()):
+            if callback:
+                callback(f"Layer {lname} ({len(shapes):,} shapes)", l_idx, max(n_layers, 1))
             self._route_shapes_by_layer[lname] = shapes
             boxes = [[s.box.xMin(), s.box.yMin(), s.box.xMax(), s.box.yMax(), 1 if s.is_via else 0] for s in shapes]
             arr = np.array(boxes, dtype=np.int32)
             self._route_boxes_by_layer[lname] = arr
             self._route_sizes_by_layer[lname] = np.maximum(arr[:, 2] - arr[:, 0], arr[:, 3] - arr[:, 1])
+
+        if callback:
+            callback("Layers", n_layers, max(n_layers, 1))
 
         # Index obstructions by layer
         self._obs_by_layer.clear()

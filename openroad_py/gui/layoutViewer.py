@@ -1,7 +1,7 @@
 """LayoutViewer widget ported from OpenROAD gui/src/layoutViewer.cpp with interactive measurement ruler and object highlighting."""
 
 import math
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Callable
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, Signal, QRect, QRectF, QPoint, QSize, QPointF, QLineF, QTimer
 from PySide6.QtGui import (
@@ -106,7 +106,7 @@ class LayoutViewer(QWidget):
     def getChip(self) -> Optional[dbChip]:
         return self._chip
 
-    def setChip(self, chip: dbChip) -> None:
+    def setChip(self, chip: Optional[dbChip], progress_callback: Optional[Callable[[str, int, int], None]] = None) -> None:
         self._chip = chip
         self._cell_boxes.clear()
         self._rulers.clear()
@@ -122,7 +122,7 @@ class LayoutViewer(QWidget):
         if chip and chip.getTech():
             self._options.tech_init(chip.getTech())
         if chip and chip.getBlock():
-            self._search.build(chip.getBlock())
+            self._search.build(chip.getBlock(), callback=progress_callback)
             self.fit()
         else:
             self.update()

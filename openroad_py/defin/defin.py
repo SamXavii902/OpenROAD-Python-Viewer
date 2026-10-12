@@ -69,6 +69,17 @@ class DefParser:
 
         return self._block
 
+    def _notify_progress(self, stage: str, cur: int, total: int, detail: str = "", sub_fraction: float = 0.0) -> None:
+        if not self._callback:
+            return
+        try:
+            self._callback(stage, cur, total, detail=detail, sub_fraction=sub_fraction)
+        except TypeError:
+            try:
+                self._callback(stage, cur, total, detail)
+            except TypeError:
+                self._callback(stage, cur, total)
+
     def _parse_top(self, reader: TokenReader) -> None:
         while reader.has_next():
             tok = reader.next()
@@ -290,8 +301,7 @@ class DefParser:
         if reader.peek() == ";":
             reader.next()
 
-        if self._callback:
-            self._callback("Components", 0, total_count)
+        self._notify_progress("Components", 0, total_count)
 
         comp_idx = 0
         while reader.has_next():
@@ -304,8 +314,8 @@ class DefParser:
                 break
             if tok == "-":
                 comp_idx += 1
-                if self._callback and comp_idx % 2000 == 0:
-                    self._callback("Components", comp_idx, total_count)
+                if comp_idx % 2000 == 0:
+                    self._notify_progress("Components", comp_idx, total_count)
                 inst_name = reader.next()
                 master_name = reader.next()
                 master = self._find_master(master_name)
@@ -348,8 +358,7 @@ class DefParser:
 
                 self._block.addInst(inst)
 
-        if self._callback:
-            self._callback("Components", comp_idx, total_count)
+        self._notify_progress("Components", comp_idx, total_count)
 
     def _parse_pins(self, reader: TokenReader) -> None:
         count_tok = reader.next()  # count
@@ -357,8 +366,7 @@ class DefParser:
         if reader.peek() == ";":
             reader.next()
 
-        if self._callback:
-            self._callback("Pins", 0, total_count)
+        self._notify_progress("Pins", 0, total_count)
 
         pin_idx = 0
         while reader.has_next():
@@ -371,8 +379,8 @@ class DefParser:
                 break
             if tok == "-":
                 pin_idx += 1
-                if self._callback and pin_idx % 200 == 0:
-                    self._callback("Pins", pin_idx, total_count)
+                if pin_idx % 200 == 0:
+                    self._notify_progress("Pins", pin_idx, total_count)
                 pin_name = reader.next()
                 bterm = dbBTerm(self._block, pin_name)
                 bpin = dbBPin()
@@ -436,8 +444,7 @@ class DefParser:
 
                 self._block.addBTerm(bterm)
 
-        if self._callback:
-            self._callback("Pins", pin_idx, total_count)
+        self._notify_progress("Pins", pin_idx, total_count)
 
     def _parse_nets(self, reader: TokenReader, is_special: bool = False) -> None:
         count_tok = reader.next()  # count
@@ -447,10 +454,9 @@ class DefParser:
 
         net_idx = 0
         stage_name = "Special Nets" if is_special else "Signal Nets"
-        update_interval = 200 if is_special else 1000
+        update_interval = 50 if is_special else 1000
 
-        if self._callback:
-            self._callback(stage_name, 0, total_count)
+        self._notify_progress(stage_name, 0, total_count)
 
         while reader.has_next():
             tok = reader.next()
@@ -462,23 +468,51 @@ class DefParser:
                 break
             if tok == "-":
                 net_idx += 1
-                if self._callback and net_idx % update_interval == 0:
-                    self._callback(stage_name, net_idx, total_count)
                 net_name = reader.next()
                 net = dbNet(self._block, net_name)
                 if is_special:
                     net.setSigType(dbSigType.POWER if "VDD" in net_name.upper() else dbSigType.GROUND)
 
                 tokens = reader.read_until_semicolon()
-                self._parse_net_tokens(net, tokens, is_special)
+
+                # Fine-grained sub-callback for large nets (e.g. power grid stripes/vias in Special Nets)
+                def token_cb(sub_cur: int, sub_total: int, shape_cnt: int) -> None:
+                    frac = sub_cur / max(sub_total, 1)
+                    pct = int(frac * 100)
+                    self._notify_progress(
+                        stage_name,
+                        net_idx,
+                        total_count,
+                        detail=f"{net_name} ({shape_cnt:,} shapes - {pct}%)",
+                        sub_fraction=frac,
+                    )
+
+                use_token_cb = is_special or len(tokens) > 2000
+                self._parse_net_tokens(
+                    net,
+                    tokens,
+                    is_special,
+                    token_callback=token_cb if use_token_cb else None,
+                )
                 self._block.addNet(net)
 
-        if self._callback:
-            self._callback(stage_name, net_idx, total_count)
+                if net_idx % update_interval == 0 or net_idx == total_count or is_special:
+                    self._notify_progress(stage_name, net_idx, total_count, detail=f"{net_name} completed")
 
-    def _parse_net_tokens(self, net: dbNet, tokens: List[str], is_special: bool) -> None:
+        self._notify_progress(stage_name, net_idx, total_count)
+
+    def _parse_net_tokens(
+        self,
+        net: dbNet,
+        tokens: List[str],
+        is_special: bool,
+        token_callback: Optional[Callable[[int, int, int], None]] = None,
+    ) -> None:
         idx = 0
         n = len(tokens)
+        shapes_parsed = 0
+        last_cb_idx = 0
+        cb_step = 1000
 
         # Parse connections: ( inst pin )
         while idx < n:
@@ -512,6 +546,10 @@ class DefParser:
         last_y: Optional[int] = None
 
         while idx < n:
+            if token_callback and (idx - last_cb_idx >= cb_step):
+                last_cb_idx = idx
+                token_callback(idx, n, shapes_parsed)
+
             t = tokens[idx].upper()
             if t == "+":
                 idx += 1
@@ -592,6 +630,7 @@ class DefParser:
                             net.addSpecialWireShape(shape)
                         else:
                             net.addWireShape(shape)
+                        shapes_parsed += 1
 
                     last_x = px
                     last_y = py
@@ -615,6 +654,7 @@ class DefParser:
                                 net.addSpecialWireShape(v_shape)
                             else:
                                 net.addWireShape(v_shape)
+                            shapes_parsed += 1
                 continue
 
             if t == "RECT":
@@ -626,6 +666,7 @@ class DefParser:
                         net.addSpecialWireShape(shape)
                     else:
                         net.addWireShape(shape)
+                    shapes_parsed += 1
                     idx += 5
                 else:
                     idx += 1
@@ -647,9 +688,13 @@ class DefParser:
                         net.addSpecialWireShape(shape)
                     else:
                         net.addWireShape(shape)
+                    shapes_parsed += 1
                 continue
 
             idx += 1
+
+        if token_callback:
+            token_callback(n, n, shapes_parsed)
 
     def _parse_blockages(self, reader: TokenReader) -> None:
         reader.next()  # count
