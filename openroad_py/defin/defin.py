@@ -290,6 +290,9 @@ class DefParser:
         if reader.peek() == ";":
             reader.next()
 
+        if self._callback:
+            self._callback("Components", 0, total_count)
+
         comp_idx = 0
         while reader.has_next():
             tok = reader.next()
@@ -301,7 +304,7 @@ class DefParser:
                 break
             if tok == "-":
                 comp_idx += 1
-                if self._callback and comp_idx % 4000 == 0:
+                if self._callback and comp_idx % 2000 == 0:
                     self._callback("Components", comp_idx, total_count)
                 inst_name = reader.next()
                 master_name = reader.next()
@@ -345,11 +348,19 @@ class DefParser:
 
                 self._block.addInst(inst)
 
+        if self._callback:
+            self._callback("Components", comp_idx, total_count)
+
     def _parse_pins(self, reader: TokenReader) -> None:
-        reader.next()  # count
+        count_tok = reader.next()  # count
+        total_count = int(count_tok) if count_tok.isdigit() else 0
         if reader.peek() == ";":
             reader.next()
 
+        if self._callback:
+            self._callback("Pins", 0, total_count)
+
+        pin_idx = 0
         while reader.has_next():
             tok = reader.next()
             if tok.upper() == "END":
@@ -359,6 +370,9 @@ class DefParser:
                     reader.next()
                 break
             if tok == "-":
+                pin_idx += 1
+                if self._callback and pin_idx % 200 == 0:
+                    self._callback("Pins", pin_idx, total_count)
                 pin_name = reader.next()
                 bterm = dbBTerm(self._block, pin_name)
                 bpin = dbBPin()
@@ -422,6 +436,9 @@ class DefParser:
 
                 self._block.addBTerm(bterm)
 
+        if self._callback:
+            self._callback("Pins", pin_idx, total_count)
+
     def _parse_nets(self, reader: TokenReader, is_special: bool = False) -> None:
         count_tok = reader.next()  # count
         total_count = int(count_tok) if count_tok.isdigit() else 0
@@ -430,6 +447,11 @@ class DefParser:
 
         net_idx = 0
         stage_name = "Special Nets" if is_special else "Signal Nets"
+        update_interval = 200 if is_special else 1000
+
+        if self._callback:
+            self._callback(stage_name, 0, total_count)
+
         while reader.has_next():
             tok = reader.next()
             if tok.upper() == "END":
@@ -440,7 +462,7 @@ class DefParser:
                 break
             if tok == "-":
                 net_idx += 1
-                if self._callback and net_idx % 4000 == 0:
+                if self._callback and net_idx % update_interval == 0:
                     self._callback(stage_name, net_idx, total_count)
                 net_name = reader.next()
                 net = dbNet(self._block, net_name)
@@ -450,6 +472,9 @@ class DefParser:
                 tokens = reader.read_until_semicolon()
                 self._parse_net_tokens(net, tokens, is_special)
                 self._block.addNet(net)
+
+        if self._callback:
+            self._callback(stage_name, net_idx, total_count)
 
     def _parse_net_tokens(self, net: dbNet, tokens: List[str], is_special: bool) -> None:
         idx = 0

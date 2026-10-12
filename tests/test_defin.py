@@ -152,3 +152,46 @@ END DESIGN
     grid = block.findTrackGrid(m1)
     assert grid is not None
 
+
+def test_def_progress_callbacks(tmp_path):
+    def_content = """VERSION 5.8 ;
+DESIGN progress_test ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 2 ;
+- c1 dummy_master + PLACED ( 100 100 ) N ;
+- c2 dummy_master + PLACED ( 200 200 ) N ;
+END COMPONENTS
+PINS 2 ;
+- in1 + NET n1 + DIRECTION INPUT + LAYER metal1 ( 0 0 ) ( 10 10 ) + FIXED ( 10 10 ) N ;
+- out1 + NET n2 + DIRECTION OUTPUT + LAYER metal1 ( 0 0 ) ( 10 10 ) + FIXED ( 20 20 ) N ;
+END PINS
+SPECIALNETS 1 ;
+- VDD ( PIN in1 ) ;
+END SPECIALNETS
+NETS 2 ;
+- n1 ( PIN in1 ) ( c1 in ) ;
+- n2 ( PIN out1 ) ( c2 out ) ;
+END NETS
+END DESIGN
+"""
+    test_def_file = tmp_path / "test_prog.def"
+    test_def_file.write_text(def_content)
+
+    stages_recorded = []
+
+    def callback(stage, cur, total):
+        stages_recorded.append((stage, cur, total))
+
+    db = dbDatabase()
+    parser = DefParser(db)
+    block = parser.parse_file(str(test_def_file), callback=callback)
+
+    assert block.getName() == "progress_test"
+    stage_names = [s[0] for s in stages_recorded]
+    assert "Components" in stage_names
+    assert "Pins" in stage_names
+    assert "Special Nets" in stage_names
+    assert "Signal Nets" in stage_names
+
+

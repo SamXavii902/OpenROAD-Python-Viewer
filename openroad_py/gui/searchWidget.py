@@ -1,7 +1,7 @@
 """Real-time Fuzzy Search and Quick-Jump Navigation Dock matching OpenROAD EDA GUI."""
 
 import difflib
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any
 from PySide6.QtWidgets import (
     QDockWidget,
     QWidget,
@@ -24,16 +24,75 @@ from openroad_py.odb.database import dbChip
 
 
 class SearchResultItem:
-    """Stores metadata for a searchable chip design object."""
+    """Stores metadata for a searchable chip design object with lazy detail formatting."""
 
-    __slots__ = ("name", "category", "rect", "detail", "score")
+    __slots__ = ("name", "category", "_rect", "_detail", "score", "_obj", "_dbu_per_um")
 
-    def __init__(self, name: str, category: str, rect: Rect, detail: str, score: float = 0.0):
+    def __init__(
+        self,
+        name: str,
+        category: str,
+        rect: Optional[Rect] = None,
+        detail: str = "",
+        score: float = 0.0,
+        obj: Any = None,
+        dbu_per_um: int = 1000,
+    ):
         self.name: str = name
         self.category: str = category  # "MACRO", "INST", "NET", "PIN"
-        self.rect: Rect = rect
-        self.detail: str = detail
+        self._obj: Any = obj
+        self._rect: Optional[Rect] = rect
+        self._detail: str = detail
         self.score: float = score
+        self._dbu_per_um: int = dbu_per_um
+
+    @property
+    def rect(self) -> Rect:
+        if self._rect is not None:
+            return self._rect
+        if self.category == "NET" and self._obj is not None:
+            shapes = self._obj.getWireShapes() + self._obj.getSpecialWireShapes()
+            if shapes:
+                x0 = min(s.box.xMin() for s in shapes)
+                y0 = min(s.box.yMin() for s in shapes)
+                x1 = max(s.box.xMax() for s in shapes)
+                y1 = max(s.box.yMax() for s in shapes)
+                self._rect = Rect(x0, y0, x1, y1)
+            else:
+                self._rect = Rect(0, 0, 0, 0)
+            return self._rect
+        return Rect(0, 0, 0, 0)
+
+    @rect.setter
+    def rect(self, val: Rect) -> None:
+        self._rect = val
+
+    @property
+    def detail(self) -> str:
+        if self._detail:
+            return self._detail
+        if self.category in ("MACRO", "INST") and self._obj is not None:
+            inst = self._obj
+            master = inst.getMaster()
+            bbox = self.rect
+            x_um = bbox.xMin() / float(self._dbu_per_um)
+            y_um = bbox.yMin() / float(self._dbu_per_um)
+            w_um = bbox.dx() / float(self._dbu_per_um)
+            h_um = bbox.dy() / float(self._dbu_per_um)
+            self._detail = f"{master.getName()} | at ({x_um:,.1f}, {y_um:,.1f}) µm | {w_um:,.1f}x{h_um:,.1f} µm"
+        elif self.category == "NET" and self._obj is not None:
+            shapes_cnt = len(self._obj.getWireShapes()) + len(self._obj.getSpecialWireShapes())
+            self._detail = f"{shapes_cnt} wire shapes | Net"
+        elif self.category == "PIN" and self._obj is not None:
+            bbox = self.rect
+            x_um = bbox.xMin() / float(self._dbu_per_um)
+            y_um = bbox.yMin() / float(self._dbu_per_um)
+            self._detail = f"IO Pin | at ({x_um:,.1f}, {y_um:,.1f}) µm"
+        return self._detail
+
+    @detail.setter
+    def detail(self, val: str) -> None:
+        self._detail = val
 
 
 class SearchDock(QDockWidget):
@@ -136,8 +195,10 @@ class SearchDock(QDockWidget):
         # Indexing:
         # 1. Macros and Standard Cells
         insts = block.getInsts()
+        macro_count = 0
+        inst_count = 0
         for idx, inst in enumerate(insts):
-            if idx > 0 and idx % 10000 == 0:
+            if idx > 0 and idx % 20000 == 0:
                 QApplication.processEvents()
             master = inst.getMaster()
             mw = master.getWidth()
@@ -149,41 +210,52 @@ class SearchDock(QDockWidget):
                 or any(k in name_lower for k in ("ram", "sram", "fakeram", "cache", "pll"))
             )
             cat = "MACRO" if is_macro else "INST"
+            if is_macro:
+                macro_count += 1
+            else:
+                inst_count += 1
             bbox = inst.getBBox().getBox()
-            x_um = bbox.xMin() / float(self._dbu_per_um)
-            y_um = bbox.yMin() / float(self._dbu_per_um)
-            w_um = bbox.dx() / float(self._dbu_per_um)
-            h_um = bbox.dy() / float(self._dbu_per_um)
-            detail = f"{master.getName()} | at ({x_um:,.1f}, {y_um:,.1f}) µm | {w_um:,.1f}x{h_um:,.1f} µm"
-            self._cached_items.append(SearchResultItem(inst.getName(), cat, bbox, detail))
+            self._cached_items.append(
+                SearchResultItem(
+                    inst.getName(),
+                    cat,
+                    rect=bbox,
+                    obj=inst,
+                    dbu_per_um=self._dbu_per_um,
+                )
+            )
 
-        # 2. Nets (compute wire bounding box)
-        for idx, net in enumerate(block.getNets()):
-            if idx > 0 and idx % 10000 == 0:
+        # 2. Nets
+        nets = block.getNets()
+        net_count = len(nets)
+        for idx, net in enumerate(nets):
+            if idx > 0 and idx % 20000 == 0:
                 QApplication.processEvents()
-            shapes = net.getWireShapes() + net.getSpecialWireShapes()
-            if shapes:
-                x0 = min(s.box.xMin() for s in shapes)
-                y0 = min(s.box.yMin() for s in shapes)
-                x1 = max(s.box.xMax() for s in shapes)
-                y1 = max(s.box.yMax() for s in shapes)
-                net_box = Rect(x0, y0, x1, y1)
-                detail = f"{len(shapes)} wire shapes | Net"
-                self._cached_items.append(SearchResultItem(net.getName(), "NET", net_box, detail))
+            self._cached_items.append(
+                SearchResultItem(
+                    net.getName(),
+                    "NET",
+                    obj=net,
+                    dbu_per_um=self._dbu_per_um,
+                )
+            )
 
         # 3. IO Pins (BTerms)
+        pin_count = 0
         for bterm in block.getBTerms():
             bbox = bterm.getBBox()
             if bbox.dx() > 0 or bbox.dy() > 0:
-                x_um = bbox.xMin() / float(self._dbu_per_um)
-                y_um = bbox.yMin() / float(self._dbu_per_um)
-                detail = f"IO Pin | at ({x_um:,.1f}, {y_um:,.1f}) µm"
-                self._cached_items.append(SearchResultItem(bterm.getName(), "PIN", bbox, detail))
+                pin_count += 1
+                self._cached_items.append(
+                    SearchResultItem(
+                        bterm.getName(),
+                        "PIN",
+                        rect=bbox,
+                        obj=bterm,
+                        dbu_per_um=self._dbu_per_um,
+                    )
+                )
 
-        macro_count = sum(1 for it in self._cached_items if it.category == "MACRO")
-        inst_count = sum(1 for it in self._cached_items if it.category == "INST")
-        net_count = sum(1 for it in self._cached_items if it.category == "NET")
-        pin_count = sum(1 for it in self._cached_items if it.category == "PIN")
         self._status_label.setText(
             f"Indexed {len(self._cached_items):,} objects ({macro_count} macros, {inst_count:,} cells, {net_count:,} nets, {pin_count} pins)"
         )

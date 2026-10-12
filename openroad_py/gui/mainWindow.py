@@ -305,8 +305,7 @@ class MainWindow(QMainWindow):
 
     def load_design_files(self, lef_paths: List[str], def_path: str) -> None:
         """Loads a complete design (LEF + DEF) with smooth progress dialog feedback."""
-        total_steps = len(lef_paths) + 3
-        progress = QProgressDialog("Initializing design database...", "Cancel", 0, total_steps, self)
+        progress = QProgressDialog("Initializing design database...", "Cancel", 0, 100, self)
         progress.setWindowTitle("Loading Physical Design")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
@@ -318,14 +317,16 @@ class MainWindow(QMainWindow):
             self._lef_files = []
             lef_parser = LefParser(self._db)
 
+            # LEF parsing occupies 0% - 15%
+            valid_lefs = [lf for lf in lef_paths if os.path.exists(lf)]
+            n_lefs = len(valid_lefs)
             step = 0
-            for lf in lef_paths:
-                if not os.path.exists(lf):
-                    continue
+            for lf in valid_lefs:
                 step += 1
-                progress.setValue(step)
+                lef_pct = int(step * 15 / max(n_lefs, 1))
+                progress.setValue(lef_pct)
                 base = os.path.basename(lf)
-                progress.setLabelText(f"Parsing LEF [{step}/{len(lef_paths)}]: {base}...")
+                progress.setLabelText(f"Parsing LEF [{step}/{n_lefs}]: {base}...")
                 QApplication.processEvents()
                 if progress.wasCanceled():
                     return
@@ -336,21 +337,32 @@ class MainWindow(QMainWindow):
             if tech:
                 self._viewer.getOptions().tech_init(tech)
 
-            total_steps = len(lef_paths) + 6
-            progress.setMaximum(total_steps)
-
+            progress.setValue(15)
             def_base = os.path.basename(def_path)
-            progress.setLabelText(f"Parsing DEF: {def_base}...")
+            progress.setLabelText(f"Initializing DEF parser for {def_base}...")
             QApplication.processEvents()
             if progress.wasCanceled():
                 return
 
             def on_def_progress(stage: str, cur: int, total: int) -> None:
-                if total > 0:
-                    pct = int(cur * 100 / total)
-                    progress.setLabelText(f"Parsing DEF {def_base}\n{stage}: {cur:,} / {total:,} ({pct}%)...")
+                ratio = min(max(cur / max(total, 1), 0.0), 1.0)
+                if stage == "Components":
+                    mapped_pct = 15 + int(ratio * 30)
+                elif stage == "Pins":
+                    mapped_pct = 45 + int(ratio * 3)
+                elif stage == "Special Nets":
+                    mapped_pct = 48 + int(ratio * 4)
+                elif stage == "Signal Nets":
+                    mapped_pct = 52 + int(ratio * 23)
                 else:
-                    progress.setLabelText(f"Parsing DEF {def_base}\n{stage}: {cur:,}...")
+                    mapped_pct = 15 + int(ratio * 60)
+
+                progress.setValue(mapped_pct)
+                if total > 0:
+                    pct = int(ratio * 100)
+                    progress.setLabelText(f"Parsing DEF: {def_base}\n{stage}: {cur:,} / {total:,} ({pct}%)...")
+                else:
+                    progress.setLabelText(f"Parsing DEF: {def_base}\n{stage}: {cur:,}...")
                 QApplication.processEvents()
 
             def_parser = DefParser(self._db)
@@ -362,37 +374,35 @@ class MainWindow(QMainWindow):
 
             chip = self._db.getChip()
 
-            step += 1
-            progress.setValue(step)
+            # 75% - 87%: Spatial Index
+            progress.setValue(76)
             progress.setLabelText(f"Building spatial index ({len(block.getInsts()):,} instances)...")
             QApplication.processEvents()
             self._viewer.setChip(chip)
+            progress.setValue(87)
             QApplication.processEvents()
+            if progress.wasCanceled():
+                return
 
-            step += 1
-            progress.setValue(step)
+            # 87% - 92%: Layer Display Controls
             progress.setLabelText("Configuring layer display controls...")
             QApplication.processEvents()
             self._controls.refresh()
+            progress.setValue(92)
             QApplication.processEvents()
 
-            step += 1
-            progress.setValue(step)
+            # 92% - 95%: Design Inspector
             progress.setLabelText("Populating Design Inspector metrics...")
             QApplication.processEvents()
             self._inspector.update_design(chip)
+            progress.setValue(95)
             QApplication.processEvents()
 
-            step += 1
-            progress.setValue(step)
+            # 95% - 99%: Search index
             progress.setLabelText("Indexing searchable components & nets...")
             QApplication.processEvents()
             self._search_dock.setChip(chip)
-            QApplication.processEvents()
-
-            step += 1
-            progress.setValue(step)
-            progress.setLabelText("Rendering layout view...")
+            progress.setValue(99)
             QApplication.processEvents()
 
             inst_count = len(block.getInsts())
@@ -406,7 +416,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Load Error", f"Failed to load design:\n{str(e)}")
         finally:
-            progress.setValue(total_steps)
+            progress.setValue(100)
 
     def load_lef(self, filepath: str, progress: Optional[QProgressDialog] = None) -> None:
         base = os.path.basename(filepath)
@@ -437,8 +447,7 @@ class MainWindow(QMainWindow):
 
     def load_def(self, filepath: str) -> None:
         def_base = os.path.basename(filepath)
-        total_steps = 6
-        progress = QProgressDialog(f"Initializing DEF parser for {def_base}...", "Cancel", 0, total_steps, self)
+        progress = QProgressDialog(f"Initializing DEF parser for {def_base}...", "Cancel", 0, 100, self)
         progress.setWindowTitle("Loading DEF File")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
@@ -446,8 +455,21 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
         def on_def_progress(stage: str, cur: int, total: int) -> None:
+            ratio = min(max(cur / max(total, 1), 0.0), 1.0)
+            if stage == "Components":
+                mapped_pct = int(ratio * 35)
+            elif stage == "Pins":
+                mapped_pct = 35 + int(ratio * 3)
+            elif stage == "Special Nets":
+                mapped_pct = 38 + int(ratio * 4)
+            elif stage == "Signal Nets":
+                mapped_pct = 42 + int(ratio * 28)
+            else:
+                mapped_pct = int(ratio * 70)
+
+            progress.setValue(mapped_pct)
             if total > 0:
-                pct = int(cur * 100 / total)
+                pct = int(ratio * 100)
                 progress.setLabelText(f"Parsing DEF: {def_base}\n{stage}: {cur:,} / {total:,} ({pct}%)...")
             else:
                 progress.setLabelText(f"Parsing DEF: {def_base}\n{stage}: {cur:,}...")
@@ -465,31 +487,36 @@ class MainWindow(QMainWindow):
             self._def_file = filepath
             chip = self._db.getChip()
 
-            progress.setValue(2)
+            # 70% - 85%: Spatial Index
+            progress.setValue(72)
             inst_count = len(block.getInsts())
             progress.setLabelText(f"Building spatial index ({inst_count:,} instances)...")
             QApplication.processEvents()
             self._viewer.setChip(chip)
+            progress.setValue(85)
             QApplication.processEvents()
             if progress.wasCanceled():
                 return
 
-            progress.setValue(3)
+            # 85% - 90%: Layer Controls
             progress.setLabelText("Configuring layer display controls...")
             QApplication.processEvents()
             self._controls.refresh()
+            progress.setValue(90)
             QApplication.processEvents()
 
-            progress.setValue(4)
+            # 90% - 93%: Design Inspector
             progress.setLabelText("Updating design inspector...")
             QApplication.processEvents()
             self._inspector.update_design(chip)
+            progress.setValue(93)
             QApplication.processEvents()
 
-            progress.setValue(5)
+            # 93% - 99%: Search Index
             progress.setLabelText("Indexing objects for fast search...")
             QApplication.processEvents()
             self._search_dock.setChip(chip)
+            progress.setValue(99)
             QApplication.processEvents()
 
             net_count = len(block.getNets())
@@ -501,7 +528,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "DEF Error", f"Failed to load DEF:\n{str(e)}")
         finally:
-            progress.setValue(total_steps)
+            progress.setValue(100)
 
     def _open_lef_dialog(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
