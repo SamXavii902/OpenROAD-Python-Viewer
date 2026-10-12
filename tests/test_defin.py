@@ -120,3 +120,35 @@ def test_parse_swerv_and_blackparrot_macros():
     for m in sram_macros:
         assert m.getMaster().getWidth() >= 30000
         assert m.getMaster().getHeight() >= 80000
+
+
+def test_parse_tracks_and_nets_with_mask(tmp_path):
+    def_content = """VERSION 5.8 ;
+DESIGN mask_test ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 50000 50000 ) ;
+TRACKS X 100 DO 500 STEP 40 MASK 1 SAMEMASK LAYER metal1 metal2 ;
+TRACKS Y 200 DO 400 STEP 50 MASK 2 LAYER metal2 ;
+PINS 1 ;
+- clk + NET clk + DIRECTION INPUT + USE CLOCK + LAYER metal1 MASK 1 ( 0 0 ) ( 100 100 ) + PLACED ( 1000 2000 ) N ;
+END PINS
+NETS 1 ;
+- net1 ( PIN clk ) + ROUTED metal1 MASK 1 ( 1000 2000 ) ( 3000 2000 ) ;
+END NETS
+END DESIGN
+"""
+    test_def_file = tmp_path / "test_mask.def"
+    test_def_file.write_text(def_content)
+
+    db = dbDatabase()
+    parser = DefParser(db)
+    block = parser.parse_file(str(test_def_file))
+
+    assert block.getName() == "mask_test"
+    assert len(block.getBTerms()) == 1
+    assert len(block.getNets()) == 1
+    m1 = db.getTech().findLayer("metal1")
+    assert m1 is not None
+    grid = block.findTrackGrid(m1)
+    assert grid is not None
+

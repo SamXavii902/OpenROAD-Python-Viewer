@@ -196,25 +196,39 @@ class DefParser:
         count = int(reader.next())
         reader.expect("STEP")
         step = int(reader.next())
-        reader.expect("LAYER")
-        layer_name = reader.next()
-        if reader.peek() == ";":
-            reader.next()
 
-        layer = self._tech.findLayer(layer_name)
-        if layer is None:
-            layer = dbTechLayer(layer_name)
-            self._tech.addLayer(layer)
+        tokens = reader.read_until_semicolon()
+        idx = 0
+        layers = []
+        while idx < len(tokens):
+            t = tokens[idx].upper()
+            if t == "MASK":
+                idx += 2  # skip 'MASK' and mask number
+            elif t == "SAMEMASK":
+                idx += 1  # skip 'SAMEMASK'
+            elif t == "LAYER":
+                idx += 1
+                while idx < len(tokens) and tokens[idx].upper() not in ("MASK", "SAMEMASK", ";"):
+                    layers.append(tokens[idx])
+                    idx += 1
+            else:
+                idx += 1
 
-        grid = self._block.findTrackGrid(layer)
-        if grid is None:
-            grid = dbTrackGrid(layer)
-            self._block.setTrackGrid(layer, grid)
+        for layer_name in layers:
+            layer = self._tech.findLayer(layer_name)
+            if layer is None:
+                layer = dbTechLayer(layer_name)
+                self._tech.addLayer(layer)
 
-        if axis == "X":
-            grid.addGridPatternX(start, count, step)
-        else:
-            grid.addGridPatternY(start, count, step)
+            grid = self._block.findTrackGrid(layer)
+            if grid is None:
+                grid = dbTrackGrid(layer)
+                self._block.setTrackGrid(layer, grid)
+
+            if axis == "X":
+                grid.addGridPatternX(start, count, step)
+            else:
+                grid.addGridPatternY(start, count, step)
 
     def _parse_vias(self, reader: TokenReader) -> None:
         reader.next()  # num vias
@@ -378,6 +392,8 @@ class DefParser:
                             curr_layer = dbTechLayer(layer_name)
                             self._tech.addLayer(curr_layer)
                         idx += 2
+                        if idx < len(tokens) and tokens[idx].upper() == "MASK":
+                            idx += 2  # skip 'MASK' and mask number
                         # Check for ( x1 y1 ) ( x2 y2 )
                         if idx + 7 < len(tokens) and tokens[idx] == "(":
                             x1 = int(round(float(tokens[idx + 1])))
@@ -476,6 +492,10 @@ class DefParser:
                 idx += 1
                 continue
 
+            if t in ("MASK", "SAMEMASK"):
+                idx += 2 if t == "MASK" else 1
+                continue
+
             if t in ("ROUTED", "FIXED", "COVER", "SHIELD", "NOSHIELD"):
                 idx += 1
                 if idx < n and tokens[idx] != "(":
@@ -486,6 +506,8 @@ class DefParser:
                         self._tech.addLayer(curr_layer)
                     curr_width = curr_layer.getWidth()
                     idx += 1
+                    if idx < n and tokens[idx].upper() == "MASK":
+                        idx += 2
                     # In SPECIALNETS, width is given right after layer
                     if is_special and idx < n and tokens[idx] not in ("(", "+"):
                         try:
