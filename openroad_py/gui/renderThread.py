@@ -620,9 +620,9 @@ class RenderThread(QThread):
         die_w = max(die_rect.dx(), 1)
         die_h = max(die_rect.dy(), 1)
 
-        # Compact, crisp EDA marker dimensions in screen pixels (10px long, 4px half-width)
-        marker_h = max(int(10.0 * scale_adjust), 2)
-        marker_w = max(int(4.0 * scale_adjust), 1)
+        # Clear, prominent EDA marker dimensions in screen pixels (16px length, 6px half-width)
+        marker_h = max(int(16.0 * scale_adjust), 4)
+        marker_w = max(int(6.0 * scale_adjust), 2)
 
         pin_color = options.ioPinColor()
         marker_pen = QPen(pin_color.darker(140), 1)
@@ -634,11 +634,11 @@ class RenderThread(QThread):
         box_brush = QBrush(pin_color)
 
         # Standard cell name matching algorithm:
-        # Hide names when zoomed out (nominalViewableResolution > 1800 DBU), identical to standard cells
+        # Hide names when zoomed out (nominalViewableResolution > 1000 DBU), identical to standard cells
         min_size = self._viewer.nominalViewableResolution()
         show_names = (
             (options.areInstanceNamesVisible() or options.areIOPinNamesVisible())
-            and min_size <= 1800
+            and min_size <= 1000
         )
         drawn_label_rects = []
         if show_names:
@@ -824,8 +824,9 @@ class RenderThread(QThread):
                     painter.setBrush(marker_brush)
                     painter.drawPolygon(qpoly)
 
-                    # 2. Draw physical pin geometry (clamp to prevent huge power rails)
-                    if box.dx() < die_w * 0.1 and box.dy() < die_h * 0.1:
+                    # 2. Draw physical pin geometry (clamp to prevent huge power rails or macro pad overlay artifacts)
+                    max_pin_span = min(int(10000 * (die_w / 1000000.0 + 1)), int(die_w * 0.02))
+                    if box.dx() <= max_pin_span and box.dy() <= max_pin_span:
                         painter.setPen(box_pen)
                         painter.setBrush(box_brush)
                         painter.drawRect(box.xMin(), box.yMin(), box.dx(), box.dy())

@@ -192,13 +192,13 @@ def test_viewer_iopin_names_zoom_threshold(qapp):
     options.setIOPinsVisible(True)
     options.setIOPinNamesVisible(True)
 
-    # In default view, nominalViewableResolution is large (> 1800 DBU),
+    # In default view, nominalViewableResolution is large (> 1000 DBU),
     # so pin names should NOT be drawn, avoiding clutter.
-    assert viewer.nominalViewableResolution() > 1800, "Default full-chip view should have nominalViewableResolution > 1800"
+    assert viewer.nominalViewableResolution() > 1000, "Default full-chip view should have nominalViewableResolution > 1000"
 
     # Zoom in to a pin on the bottom edge
     viewer.zoomTo(Rect(44000, -1000, 45000, 1000))
-    assert viewer.nominalViewableResolution() <= 1800, "Zoomed-in view should enable pin name display"
+    assert viewer.nominalViewableResolution() <= 1000, "Zoomed-in view should enable pin name display"
 
     test_image = QImage(800, 600, QImage.Format_ARGB32_Premultiplied)
     draw_bounds = QRect(0, 0, 800, 600)
@@ -229,15 +229,16 @@ def test_viewer_iopin_names_rotation_and_collision_avoidance(qapp):
     options.setIOPinsVisible(True)
     options.setIOPinNamesVisible(True)
 
-    # Zoom in to the bottom edge where multiple IO pins sit side by side
+    # Zoom in to a section of the bottom edge where multiple IO pins sit side by side
     die = block.getDieArea()
-    viewer.zoomTo(Rect(die.xMin(), die.yMin() - 5000, die.xMax(), die.yMin() + 5000))
-    assert viewer.nominalViewableResolution() <= 1800
+    viewer.zoomTo(Rect(40000, die.yMin() - 5000, 90000, die.yMin() + 5000))
+    assert viewer.nominalViewableResolution() <= 1000
 
     test_image = QImage(1000, 800, QImage.Format_ARGB32_Premultiplied)
     draw_bounds = QRect(0, 0, 1000, 800)
     viewer._render_thread.draw(test_image, draw_bounds)
     assert not test_image.isNull()
     viewer.close()
+
 
 

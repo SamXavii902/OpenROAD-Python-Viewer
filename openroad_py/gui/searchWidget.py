@@ -244,14 +244,27 @@ class SearchDock(QDockWidget):
 
         # 3. IO Pins (BTerms)
         pin_count = 0
+        die_rect = block.getDieArea()
+        die_w = max(die_rect.dx(), 1) if die_rect.area() > 0 else 1000000
+        max_pin_span = min(int(10000 * (die_w / 1000000.0 + 1)), int(die_w * 0.02))
+
         for bterm in block.getBTerms():
             bbox = bterm.getBBox()
             pin_count += 1
+            # If the raw pin box is gigantic (e.g. power rings or macro pads), clamp the search rect around its center
+            if bbox.dx() > max_pin_span or bbox.dy() > max_pin_span:
+                cx = (bbox.xMin() + bbox.xMax()) // 2
+                cy = (bbox.yMin() + bbox.yMax()) // 2
+                d = max(140, min(max_pin_span // 2, 2000))
+                norm_rect = Rect(cx - d, cy - d, cx + d, cy + d)
+            else:
+                norm_rect = bbox
+
             self._cached_items.append(
                 SearchResultItem(
                     bterm.getName(),
                     "PIN",
-                    rect=bbox,
+                    rect=norm_rect,
                     obj=bterm,
                     dbu_per_um=self._dbu_per_um,
                 )
