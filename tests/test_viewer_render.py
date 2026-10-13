@@ -206,3 +206,38 @@ def test_viewer_iopin_names_zoom_threshold(qapp):
     assert not test_image.isNull()
     viewer.close()
 
+
+def test_viewer_iopin_names_rotation_and_collision_avoidance(qapp):
+    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_tech.lef"
+    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_stdcell.lef"
+    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\src\odb\test\data\gcd\gcd_nangate45_route.def"
+
+    db = dbDatabase()
+    lef_parser = LefParser(db)
+    lef_parser.parse_file(lef_path1)
+    lef_parser.parse_file(lef_path2)
+
+    def_parser = DefParser(db)
+    block = def_parser.parse_file(def_path)
+    chip = db.getChip()
+
+    viewer = LayoutViewer()
+    viewer.resize(1000, 800)
+    viewer.setChip(chip)
+
+    options = viewer.getOptions()
+    options.setIOPinsVisible(True)
+    options.setIOPinNamesVisible(True)
+
+    # Zoom in to the bottom edge where multiple IO pins sit side by side
+    die = block.getDieArea()
+    viewer.zoomTo(Rect(die.xMin(), die.yMin() - 5000, die.xMax(), die.yMin() + 5000))
+    assert viewer.nominalViewableResolution() <= 1800
+
+    test_image = QImage(1000, 800, QImage.Format_ARGB32_Premultiplied)
+    draw_bounds = QRect(0, 0, 1000, 800)
+    viewer._render_thread.draw(test_image, draw_bounds)
+    assert not test_image.isNull()
+    viewer.close()
+
+

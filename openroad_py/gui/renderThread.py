@@ -640,6 +640,7 @@ class RenderThread(QThread):
             (options.areInstanceNamesVisible() or options.areIOPinNamesVisible())
             and min_size <= 1800
         )
+        drawn_label_rects = []
         if show_names:
             font_cell = QFont("Segoe UI", 8)
             fm_cell = QFontMetrics(font_cell)
@@ -834,28 +835,57 @@ class RenderThread(QThread):
                         name = bterm.getName()
                         tw = fm_cell.horizontalAdvance(name)
                         th = fm_cell.height()
-                        painter.save()
-                        painter.setFont(font_cell)
-                        painter.setPen(QPen(options.instanceNameColor(), 0))
                         gap = int(4.0 * scale_adjust)
 
-                        if arg_min == 0:  # Left
-                            painter.translate(bx - marker_h - gap, cy)
-                            painter.scale(scale_adjust, -scale_adjust)
-                            painter.drawText(-tw, th // 3, name)
-                        elif arg_min == 1:  # Right
-                            painter.translate(bx + marker_h + gap, cy)
-                            painter.scale(scale_adjust, -scale_adjust)
-                            painter.drawText(0, th // 3, name)
-                        elif arg_min == 2:  # Top
-                            painter.translate(cx, by + marker_h + gap)
-                            painter.scale(scale_adjust, -scale_adjust)
-                            painter.drawText(-tw // 2, th, name)
-                        else:  # Bottom
-                            painter.translate(cx, by - marker_h - gap)
-                            painter.scale(scale_adjust, -scale_adjust)
-                            painter.drawText(-tw // 2, 0, name)
-                        painter.restore()
+                        # Determine screen-space bounding box to prevent overlapping text collision
+                        # Left (arg_min == 0) & Right (arg_min == 1): horizontal text
+                        # Top (arg_min == 2) & Bottom (arg_min == 3): vertical rotated text (prevents side-by-side collisions)
+                        if arg_min == 0:  # Left edge (horizontal text extending left)
+                            screen_pt = painter.transform().map(QPointF(bx - marker_h - gap, cy))
+                            label_rect = QRectF(screen_pt.x() - tw, screen_pt.y() - th * 0.7, tw, th)
+                        elif arg_min == 1:  # Right edge (horizontal text extending right)
+                            screen_pt = painter.transform().map(QPointF(bx + marker_h + gap, cy))
+                            label_rect = QRectF(screen_pt.x(), screen_pt.y() - th * 0.7, tw, th)
+                        elif arg_min == 2:  # Top edge (vertical text extending upwards away from chip)
+                            screen_pt = painter.transform().map(QPointF(cx, by + marker_h + gap))
+                            label_rect = QRectF(screen_pt.x() - th * 0.5, screen_pt.y() - tw, th, tw)
+                        else:  # Bottom edge (vertical text extending downwards away from chip)
+                            screen_pt = painter.transform().map(QPointF(cx, by - marker_h - gap))
+                            label_rect = QRectF(screen_pt.x() - th * 0.5, screen_pt.y(), th, tw)
+
+                        # Check collision against previously rendered labels
+                        collides = False
+                        for prev_rect in drawn_label_rects:
+                            if label_rect.intersects(prev_rect):
+                                collides = True
+                                break
+
+                        if not collides:
+                            drawn_label_rects.append(label_rect)
+                            painter.save()
+                            painter.setFont(font_cell)
+                            painter.setPen(QPen(options.instanceNameColor(), 0))
+
+                            if arg_min == 0:  # Left
+                                painter.translate(bx - marker_h - gap, cy)
+                                painter.scale(scale_adjust, -scale_adjust)
+                                painter.drawText(-tw, th // 3, name)
+                            elif arg_min == 1:  # Right
+                                painter.translate(bx + marker_h + gap, cy)
+                                painter.scale(scale_adjust, -scale_adjust)
+                                painter.drawText(0, th // 3, name)
+                            elif arg_min == 2:  # Top (rotated 90 deg, extending up away from chip)
+                                painter.translate(cx, by + marker_h + gap)
+                                painter.scale(scale_adjust, -scale_adjust)
+                                painter.rotate(-90)
+                                painter.drawText(0, th // 3, name)
+                            else:  # Bottom (rotated -90 deg, extending down away from chip)
+                                painter.translate(cx, by - marker_h - gap)
+                                painter.scale(scale_adjust, -scale_adjust)
+                                painter.rotate(90)
+                                painter.drawText(0, th // 3, name)
+
+                            painter.restore()
 
     # Ported from: gui/src/renderThread.cpp:659 drawInstanceNames
     def drawInstanceNames(self, painter: QPainter, insts: List[dbInst]) -> None:
