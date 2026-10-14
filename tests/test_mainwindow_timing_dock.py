@@ -4,8 +4,8 @@ import os
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from openroad_py.gui.mainWindow import MainWindow
-from openroad_py.timing.tarpt_parser import TimingPath
+from rishi.gui.mainWindow import MainWindow
+from rishi.timing.tarpt_parser import TimingPath
 
 TARPT_PATH = r"C:\High-Speed-LLM-using-RAG\data\ActualLogFiles\route_reg2reg.tarpt"
 

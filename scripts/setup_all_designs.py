@@ -4,7 +4,7 @@ import urllib.request
 
 WORKSPACE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DESIGNS_DIR = os.path.join(WORKSPACE_DIR, "designs")
-SCRATCH_OPENROAD = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD"
+SCRATCH_RISHI = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI"
 
 def setup_designs():
     os.makedirs(DESIGNS_DIR, exist_ok=True)
@@ -14,16 +14,16 @@ def setup_designs():
     os.makedirs(sky130_dir, exist_ok=True)
 
     # 1. Nangate45 LEF files
-    src_tech = os.path.join(SCRATCH_OPENROAD, "test", "Nangate45", "Nangate45_tech.lef")
-    src_std = os.path.join(SCRATCH_OPENROAD, "test", "Nangate45", "Nangate45_stdcell.lef")
+    src_tech = os.path.join(SCRATCH_RISHI, "test", "Nangate45", "Nangate45_tech.lef")
+    src_std = os.path.join(SCRATCH_RISHI, "test", "Nangate45", "Nangate45_stdcell.lef")
     if os.path.exists(src_tech):
         shutil.copy2(src_tech, nangate_dir)
     if os.path.exists(src_std):
         shutil.copy2(src_std, nangate_dir)
 
     # 2. Sky130 LEF files
-    src_sky_tlef = os.path.join(SCRATCH_OPENROAD, "test", "sky130hd", "sky130hd.tlef")
-    src_sky_mlef = os.path.join(SCRATCH_OPENROAD, "test", "sky130hd", "sky130_fd_sc_hd_merged.lef")
+    src_sky_tlef = os.path.join(SCRATCH_RISHI, "test", "sky130hd", "sky130hd.tlef")
+    src_sky_mlef = os.path.join(SCRATCH_RISHI, "test", "sky130hd", "sky130_fd_sc_hd_merged.lef")
     if os.path.exists(src_sky_tlef):
         shutil.copy2(src_sky_tlef, sky130_dir)
     if os.path.exists(src_sky_mlef):
@@ -32,8 +32,8 @@ def setup_designs():
     # 3. SweRV Placed Core (28 SRAM Macros, 131k Placed Standard Cells)
     swerv_dir = os.path.join(DESIGNS_DIR, "swerv_wrapper")
     os.makedirs(swerv_dir, exist_ok=True)
-    src_swerv_macro_lef = os.path.join(SCRATCH_OPENROAD, "src", "gpl", "test", "swerv_wrapper_macro.lef")
-    src_swerv_placed_def = os.path.join(SCRATCH_OPENROAD, "src", "gpl", "test", "macro03.defok")
+    src_swerv_macro_lef = os.path.join(SCRATCH_RISHI, "src", "gpl", "test", "swerv_wrapper_macro.lef")
+    src_swerv_placed_def = os.path.join(SCRATCH_RISHI, "src", "gpl", "test", "macro03.defok")
     if os.path.exists(src_swerv_macro_lef):
         shutil.copy2(src_swerv_macro_lef, swerv_dir)
     if os.path.exists(src_swerv_placed_def):
@@ -42,8 +42,8 @@ def setup_designs():
     # 4. BlackParrot Placed SoC (10 Cache Macros, 76k Placed Standard Cells)
     bp_dir = os.path.join(DESIGNS_DIR, "blackparrot")
     os.makedirs(bp_dir, exist_ok=True)
-    src_bp_macro_lef = os.path.join(SCRATCH_OPENROAD, "src", "gpl", "test", "bp_be_top_macro.lef")
-    src_bp_placed_def = os.path.join(SCRATCH_OPENROAD, "src", "gpl", "test", "macro01.defok")
+    src_bp_macro_lef = os.path.join(SCRATCH_RISHI, "src", "gpl", "test", "bp_be_top_macro.lef")
+    src_bp_placed_def = os.path.join(SCRATCH_RISHI, "src", "gpl", "test", "macro01.defok")
     if os.path.exists(src_bp_macro_lef):
         shutil.copy2(src_bp_macro_lef, bp_dir)
     if os.path.exists(src_bp_placed_def):
@@ -52,8 +52,8 @@ def setup_designs():
     # 5. Leon3 Large Benchmarks: large01 (220k cells) and large02 (312k cells)
     large_dir = os.path.join(DESIGNS_DIR, "large")
     os.makedirs(large_dir, exist_ok=True)
-    src_large01 = os.path.join(SCRATCH_OPENROAD, "src", "gpl", "test", "large01.defok")
-    src_large02 = os.path.join(SCRATCH_OPENROAD, "src", "gpl", "test", "large02.def")
+    src_large01 = os.path.join(SCRATCH_RISHI, "src", "gpl", "test", "large01.defok")
+    src_large02 = os.path.join(SCRATCH_RISHI, "src", "gpl", "test", "large02.def")
     if os.path.exists(src_large01):
         shutil.copy2(src_large01, os.path.join(large_dir, "large01.def"))
     if os.path.exists(src_large02):
@@ -62,22 +62,22 @@ def setup_designs():
     # 6. Medium Benchmark (80k cells, 100k nets)
     med_dir = os.path.join(DESIGNS_DIR, "medium")
     os.makedirs(med_dir, exist_ok=True)
-    src_med04 = os.path.join(SCRATCH_OPENROAD, "src", "gpl", "test", "medium04.defok")
+    src_med04 = os.path.join(SCRATCH_RISHI, "src", "gpl", "test", "medium04.defok")
     if os.path.exists(src_med04):
         shutil.copy2(src_med04, os.path.join(med_dir, "medium04.def"))
 
     # 7. Sky130 Multi-Power-Domain AES Crypto Engine (UPF Voltage Domains)
     upf_dir = os.path.join(DESIGNS_DIR, "upf_aes")
     os.makedirs(upf_dir, exist_ok=True)
-    src_upf = os.path.join(SCRATCH_OPENROAD, "test", "upf_aes.defok")
+    src_upf = os.path.join(SCRATCH_RISHI, "test", "upf_aes.defok")
     if os.path.exists(src_upf):
         shutil.copy2(src_upf, os.path.join(upf_dir, "upf_aes.def"))
 
     # 8. Sky130 Cell On Block (Dense Macro with Standard Cell Channel Placement)
     cob_dir = os.path.join(DESIGNS_DIR, "cell_on_block")
     os.makedirs(cob_dir, exist_ok=True)
-    src_cob_lef = os.path.join(SCRATCH_OPENROAD, "src", "dpl", "test", "cell_on_block2.lef")
-    src_cob_def = os.path.join(SCRATCH_OPENROAD, "src", "dpl", "test", "cell_on_block2.defok")
+    src_cob_lef = os.path.join(SCRATCH_RISHI, "src", "dpl", "test", "cell_on_block2.lef")
+    src_cob_def = os.path.join(SCRATCH_RISHI, "src", "dpl", "test", "cell_on_block2.defok")
     if os.path.exists(src_cob_lef):
         shutil.copy2(src_cob_lef, cob_dir)
     if os.path.exists(src_cob_def):
@@ -86,7 +86,7 @@ def setup_designs():
     # 9. GCD Routed Core
     gcd_dir = os.path.join(DESIGNS_DIR, "gcd")
     os.makedirs(gcd_dir, exist_ok=True)
-    src_gcd = os.path.join(SCRATCH_OPENROAD, "src", "odb", "test", "data", "gcd", "gcd_nangate45_route.def")
+    src_gcd = os.path.join(SCRATCH_RISHI, "src", "odb", "test", "data", "gcd", "gcd_nangate45_route.def")
     if os.path.exists(src_gcd):
         shutil.copy2(src_gcd, gcd_dir)
 

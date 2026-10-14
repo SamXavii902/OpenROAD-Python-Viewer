@@ -3,11 +3,11 @@ import pytest
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QImage
 from PySide6.QtCore import QRect
-from openroad_py.odb.database import dbDatabase
-from openroad_py.odb.geom import Rect
-from openroad_py.lefin import LefParser
-from openroad_py.defin import DefParser
-from openroad_py.gui.layoutViewer import LayoutViewer
+from rishi.odb.database import dbDatabase
+from rishi.odb.geom import Rect
+from rishi.lefin import LefParser
+from rishi.defin import DefParser
+from rishi.gui.layoutViewer import LayoutViewer
 
 
 @pytest.fixture(scope="session")
@@ -20,9 +20,9 @@ def qapp():
 
 
 def test_viewer_renders_routed_design(qapp):
-    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_tech.lef"
-    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_stdcell.lef"
-    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\src\odb\test\data\gcd\gcd_nangate45_route.def"
+    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_tech.lef"
+    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_stdcell.lef"
+    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\src\odb\test\data\gcd\gcd_nangate45_route.def"
 
     assert os.path.exists(lef_path1)
     assert os.path.exists(lef_path2)
@@ -68,9 +68,9 @@ def test_viewer_renders_routed_design(qapp):
 
 
 def test_viewer_placement_density_heatmap(qapp):
-    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_tech.lef"
-    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_stdcell.lef"
-    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\src\odb\test\data\gcd\gcd_nangate45_route.def"
+    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_tech.lef"
+    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_stdcell.lef"
+    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\src\odb\test\data\gcd\gcd_nangate45_route.def"
 
     db = dbDatabase()
     lef_parser = LefParser(db)
@@ -100,9 +100,9 @@ def test_viewer_placement_density_heatmap(qapp):
 
 
 def test_viewer_renders_iopins_with_layers_off(qapp):
-    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_tech.lef"
-    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_stdcell.lef"
-    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\src\odb\test\data\gcd\gcd_nangate45_route.def"
+    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_tech.lef"
+    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_stdcell.lef"
+    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\src\odb\test\data\gcd\gcd_nangate45_route.def"
 
     db = dbDatabase()
     lef_parser = LefParser(db)
@@ -170,9 +170,9 @@ def test_viewer_renders_iopins_with_layers_off(qapp):
 
 
 def test_viewer_iopin_names_zoom_threshold(qapp):
-    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_tech.lef"
-    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_stdcell.lef"
-    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\src\odb\test\data\gcd\gcd_nangate45_route.def"
+    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_tech.lef"
+    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_stdcell.lef"
+    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\src\odb\test\data\gcd\gcd_nangate45_route.def"
 
     db = dbDatabase()
     lef_parser = LefParser(db)
@@ -208,9 +208,9 @@ def test_viewer_iopin_names_zoom_threshold(qapp):
 
 
 def test_viewer_iopin_names_rotation_and_collision_avoidance(qapp):
-    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_tech.lef"
-    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\test\Nangate45\Nangate45_stdcell.lef"
-    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD\src\odb\test\data\gcd\gcd_nangate45_route.def"
+    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_tech.lef"
+    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_stdcell.lef"
+    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\src\odb\test\data\gcd\gcd_nangate45_route.def"
 
     db = dbDatabase()
     lef_parser = LefParser(db)
@@ -286,7 +286,7 @@ END DESIGN
     viewer._render_thread.draw(test_image, draw_bounds)
 
     # Check interior stepped segment midpoint: (729294, 2035072) on the top-middle step
-    from openroad_py.odb.geom import Point
+    from rishi.odb.geom import Point
     pt_step = viewer.dbuPointToScreen(Point(729294, 2035072))
     sx, sy = int(round(pt_step.x())), int(round(pt_step.y()))
     found_poly_cyan = False

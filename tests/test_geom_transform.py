@@ -1,7 +1,7 @@
 import pytest
-from openroad_py.odb.geom import Point, Rect, Polygon
-from openroad_py.odb.types import dbOrientType
-from openroad_py.odb.transform import dbTransform
+from rishi.odb.geom import Point, Rect, Polygon
+from rishi.odb.types import dbOrientType
+from rishi.odb.transform import dbTransform
 
 
 def test_point():

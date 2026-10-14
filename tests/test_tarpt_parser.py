@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from openroad_py.timing.tarpt_parser import TarptParser, TimingPath, TimingReportData
+from rishi.timing.tarpt_parser import TarptParser, TimingPath, TimingReportData
 
 TARPT_PATH = r"C:\High-Speed-LLM-using-RAG\data\ActualLogFiles\route_reg2reg.tarpt"
 

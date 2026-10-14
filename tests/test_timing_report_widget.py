@@ -5,7 +5,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from openroad_py.gui.timingReportWidget import (
+from rishi.gui.timingReportWidget import (
     CategorySummaryWidget,
     OptimizationFailureReasonTable,
     PathCategoryTable,
@@ -14,8 +14,8 @@ from openroad_py.gui.timingReportWidget import (
     TimingReportDock,
     TimingReportWidget,
 )
-from openroad_py.gui.layoutViewer import LayoutViewer
-from openroad_py.timing.tarpt_parser import TarptParser, TimingPath
+from rishi.gui.layoutViewer import LayoutViewer
+from rishi.timing.tarpt_parser import TarptParser, TimingPath
 
 TARPT_PATH = r"C:\High-Speed-LLM-using-RAG\data\ActualLogFiles\route_reg2reg.tarpt"
 
@@ -245,12 +245,12 @@ Timing Path:
 
 def test_layout_viewer_mbit_alias_resolution(qapp):
     """Verifies LayoutViewer maps multi-bit CDN_MBIT_ register names to physical instances."""
-    from openroad_py.odb.database import dbDatabase, dbChip
-    from openroad_py.odb.block import dbBlock, dbInst
-    from openroad_py.odb.lib import dbMaster
-    from openroad_py.odb.tech import dbTech
-    from openroad_py.odb.geom import Rect, Point
-    from openroad_py.odb.types import dbPlacementStatus
+    from rishi.odb.database import dbDatabase, dbChip
+    from rishi.odb.block import dbBlock, dbInst
+    from rishi.odb.lib import dbMaster
+    from rishi.odb.tech import dbTech
+    from rishi.odb.geom import Rect, Point
+    from rishi.odb.types import dbPlacementStatus
 
     db = dbDatabase()
     tech = dbTech(1000)
@@ -286,7 +286,7 @@ def test_layout_viewer_mbit_alias_resolution(qapp):
 def test_layout_viewer_hud_badge_and_single_point_render(qapp):
     """Verifies that _draw_timing_paths renders cleanly for both 1-point and 2-point paths."""
     from PySide6.QtGui import QPainter, QImage
-    from openroad_py.odb.geom import Point
+    from rishi.odb.geom import Point
 
     viewer = LayoutViewer()
     viewer.resize(800, 600)
@@ -314,13 +314,13 @@ def test_layout_viewer_hud_badge_and_single_point_render(qapp):
 
 def test_manhattan_wirelength_computation(qapp):
     """Verifies Manhattan wire length fallback is computed in microns when nets are unrouted."""
-    from openroad_py.odb.database import dbDatabase, dbChip
-    from openroad_py.odb.block import dbBlock, dbInst
-    from openroad_py.odb.lib import dbMaster
-    from openroad_py.odb.tech import dbTech
-    from openroad_py.odb.geom import Rect
-    from openroad_py.odb.types import dbPlacementStatus
-    from openroad_py.timing.tarpt_parser import TimingReportData
+    from rishi.odb.database import dbDatabase, dbChip
+    from rishi.odb.block import dbBlock, dbInst
+    from rishi.odb.lib import dbMaster
+    from rishi.odb.tech import dbTech
+    from rishi.odb.geom import Rect
+    from rishi.odb.types import dbPlacementStatus
+    from rishi.timing.tarpt_parser import TimingReportData
 
     db = dbDatabase()
     tech = dbTech(1000)  # 1000 dbu per micron

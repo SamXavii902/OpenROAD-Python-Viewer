@@ -1,7 +1,7 @@
 import os
 import pytest
 from PySide6.QtWidgets import QApplication, QDockWidget
-from openroad_py.gui.mainWindow import MainWindow
+from rishi.gui.mainWindow import MainWindow
 
 
 @pytest.fixture(scope="module")
@@ -57,9 +57,9 @@ def test_mainwindow_docks_and_customization(main_win):
 
 def test_inspector_and_search_indexing(main_win):
     """Verifies that loading a design populates inspector and search index without errors."""
-    from openroad_py.odb.database import dbDatabase
-    from openroad_py.lefin import LefParser
-    from openroad_py.defin import DefParser
+    from rishi.odb.database import dbDatabase
+    from rishi.lefin import LefParser
+    from rishi.defin import DefParser
 
     db = dbDatabase()
     lp = LefParser(db)
@@ -158,7 +158,7 @@ def test_display_controls_and_options(main_win):
     assert options.showFlightlines() is True
 
     # Ruler measurement
-    from openroad_py.odb.geom import Point
+    from rishi.odb.geom import Point
     viewer.setRulerMode(True)
     assert viewer.isRulerMode()
     p1 = Point(0, 0)
@@ -190,7 +190,7 @@ def test_display_controls_and_options(main_win):
 
 def test_legend_and_controls_polygon_boundary(main_win):
     """Verifies that LegendDock and DisplayControls expose both rectangular die boundary and polygon boundary."""
-    from openroad_py.gui.legend import LegendItem
+    from rishi.gui.legend import LegendItem
     from PySide6.QtGui import QColor
 
     legend_items = main_win._legend.findChildren(LegendItem)
@@ -211,7 +211,7 @@ def test_legend_and_controls_polygon_boundary(main_win):
 
 def test_legend_and_controls_blockages(main_win):
     """Verifies that LegendDock and DisplayControls expose Placement Blockages with color customization."""
-    from openroad_py.gui.legend import LegendItem
+    from rishi.gui.legend import LegendItem
     from PySide6.QtGui import QColor
 
     legend_items = main_win._legend.findChildren(LegendItem)

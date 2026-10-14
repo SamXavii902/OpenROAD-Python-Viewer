@@ -3,7 +3,7 @@
 import os
 import shutil
 
-SCRATCH_DIR = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\OpenROAD"
+SCRATCH_DIR = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI"
 WORKSPACE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DESIGNS_DIR = os.path.join(WORKSPACE_DIR, "designs")
 

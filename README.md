@@ -1,11 +1,11 @@
-# OpenROAD Native Python EDA Layout Viewer (`openroad_py`)
+# RISHI Native Python EDA Layout Viewer (`rishi`)
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![GUI Framework](https://img.shields.io/badge/GUI-PySide6%20%28Qt6%29-green.svg)](https://wiki.qt.io/Qt_for_Python)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/SamXavii902)
 [![License](https://img.shields.io/badge/License-BSD--3--Clause-orange.svg)](LICENSE)
 
-A high-performance, native Python EDA layout viewer for physical design **LEF** and **DEF** files, ported directly from the official **OpenROAD** source code (`src/gui` and `src/odb`).
+A high-performance, native Python EDA layout viewer for physical design **LEF** and **DEF** files, ported directly from the official **RISHI** source code (`src/gui` and `src/odb`).
 
 Designed to run seamlessly across **Windows**, **Linux**, and **macOS** with zero C++ compilation dependencies.
 
@@ -35,8 +35,8 @@ Designed to run seamlessly across **Windows**, **Linux**, and **macOS** with zer
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/SamXavii902/OpenROAD-Python-Viewer.git
-cd OpenROAD-Python-Viewer
+git clone https://github.com/SamXavii902/RISHI-Python-Viewer.git
+cd RISHI-Python-Viewer
 ```
 
 ### 2. Set Up Virtual Environment
@@ -143,4 +143,4 @@ All 17 automated unit and integration tests verify:
 
 ## License
 
-BSD 3-Clause License. See [LICENSE](LICENSE) for details. Ported from the [OpenROAD Project](https://github.com/The-OpenROAD-Project/OpenROAD).
+BSD 3-Clause License. See [LICENSE](LICENSE) for details. Ported from the [RISHI Project](https://github.com/The-RISHI-Project/RISHI).

@@ -9,10 +9,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QImage
 from PySide6.QtCore import QRect
-from openroad_py.odb.database import dbDatabase
-from openroad_py.lefin import LefParser
-from openroad_py.defin import DefParser
-from openroad_py.gui.layoutViewer import LayoutViewer
+from rishi.odb.database import dbDatabase
+from rishi.lefin import LefParser
+from rishi.defin import DefParser
+from rishi.gui.layoutViewer import LayoutViewer
 
 
 def export_design_png(lef_files, def_file, out_png, width=1920, height=1080):

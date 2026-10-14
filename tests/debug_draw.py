@@ -8,10 +8,10 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 try:
     from PySide6.QtWidgets import QApplication
     app = QApplication([])
-    from openroad_py.odb.database import dbDatabase
-    from openroad_py.lefin import LefParser
-    from openroad_py.defin import DefParser
-    from openroad_py.gui.layoutViewer import LayoutViewer
+    from rishi.odb.database import dbDatabase
+    from rishi.lefin import LefParser
+    from rishi.defin import DefParser
+    from rishi.gui.layoutViewer import LayoutViewer
     from PySide6.QtGui import QImage
     from PySide6.QtCore import QRect
 
