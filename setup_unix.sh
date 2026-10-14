@@ -54,6 +54,7 @@ if [ -z "$DISPLAY" ]; then
     echo "[WARN] No DISPLAY detected. Using headless mode (QT_QPA_PLATFORM=offscreen)."
     export QT_QPA_PLATFORM=offscreen
 fi
+export QT_STYLE_OVERRIDE="Fusion"
 
 # 6. Create virtual environment if not already present
 VENV_DIR=".venv"
@@ -83,3 +84,4 @@ if [ $# -gt 0 ]; then
 else
     python run_gui.py
 fi
+

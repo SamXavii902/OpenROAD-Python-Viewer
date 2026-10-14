@@ -29,6 +29,7 @@ from rishi.gui.inspector import InspectorDock
 from rishi.gui.searchWidget import SearchDock
 from rishi.gui.timingReportWidget import TimingReportDock
 from rishi.timing.tarpt_parser import TarptParser
+from rishi.gui.theme import apply_dark_theme
 
 
 class MainWindow(QMainWindow):
@@ -36,6 +37,10 @@ class MainWindow(QMainWindow):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        app = QApplication.instance()
+        if app is not None and not getattr(app, "_rishi_dark_theme_applied", False):
+            apply_dark_theme(app)
+            app._rishi_dark_theme_applied = True
         self.setWindowTitle("RISHI Python EDA Viewer")
         self.resize(1400, 880)
 

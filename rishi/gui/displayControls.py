@@ -32,6 +32,13 @@ class DisplayControls(QDockWidget):
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Feature", "Color"])
         self._tree.setColumnWidth(0, 160)
+        self._tree.setStyleSheet(
+            "QTreeWidget { background-color: #161922; color: #E2E8F0; border: none; font-size: 8pt; }"
+            "QTreeWidget::item { padding: 2px 0; }"
+            "QTreeWidget::item:hover { background-color: #232733; }"
+            "QTreeWidget::item:selected { background-color: #2A3142; color: #00E5FF; }"
+            "QHeaderView::section { background-color: #1E222D; color: #A0A8B8; border: none; font-weight: bold; padding: 4px; }"
+        )
 
         widget = QWidget()
         layout = QVBoxLayout(widget)

@@ -6,6 +6,7 @@ import glob
 import argparse
 from PySide6.QtWidgets import QApplication
 from rishi.gui.mainWindow import MainWindow
+from rishi.gui.theme import apply_dark_theme
 
 
 def main():
@@ -19,7 +20,7 @@ def main():
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
-    app.setStyle("Fusion")
+    apply_dark_theme(app)
 
     window = MainWindow()
 
