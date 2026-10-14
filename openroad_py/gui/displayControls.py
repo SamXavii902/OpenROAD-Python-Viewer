@@ -113,6 +113,7 @@ class DisplayControls(QDockWidget):
             "_show_die_boundary": options.dieColor(),
             "_show_polygon_boundary": options.polygonColor(),
             "_show_io_pins": options.ioPinColor(),
+            "_show_blockages": options.placementBlockageColor(),
         }
 
         for name, checked, attr in categories:
@@ -186,6 +187,17 @@ class DisplayControls(QDockWidget):
             new_color = QColorDialog.getColor(options.ioPinColor(), self, "Select IO Pin Color")
             if new_color.isValid():
                 options.setIoPinColor(new_color)
+                item.setIcon(1, self._create_color_icon(new_color))
+                self._viewer.fullRepaint()
+        elif data == "_show_blockages":
+            new_color = QColorDialog.getColor(
+                options.placementBlockageColor(),
+                self,
+                "Select Placement Blockage Color",
+                QColorDialog.ShowAlphaChannel,
+            )
+            if new_color.isValid():
+                options.setPlacementBlockageColor(new_color)
                 item.setIcon(1, self._create_color_icon(new_color))
                 self._viewer.fullRepaint()
 

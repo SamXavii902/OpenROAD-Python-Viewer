@@ -209,4 +209,33 @@ def test_legend_and_controls_polygon_boundary(main_win):
     assert main_win._viewer.getOptions().polygonColor() == new_col
 
 
+def test_legend_and_controls_blockages(main_win):
+    """Verifies that LegendDock and DisplayControls expose Placement Blockages with color customization."""
+    from openroad_py.gui.legend import LegendItem
+    from PySide6.QtGui import QColor
+
+    legend_items = main_win._legend.findChildren(LegendItem)
+    titles = [it._title for it in legend_items]
+    assert any("Blockage" in t for t in titles)
+
+    blk_item = next(it for it in legend_items if "Blockage" in it._title)
+    assert blk_item._swatch._is_hatch is True
+
+    # Trigger swatch paintEvent to ensure hatch pattern swatch renders cleanly
+    pixmap = blk_item._swatch.grab()
+    assert not pixmap.isNull()
+
+    # Altering blockage color via callback updates viewer options
+    custom_color = QColor(220, 80, 80, 190)
+    blk_item._on_color_changed(custom_color)
+    assert main_win._viewer.getOptions().placementBlockageColor() == custom_color
+    assert main_win._viewer.getOptions().blockageColor() == custom_color
+
+    # Verify DisplayControls has blockage in object items with icon
+    assert "_show_blockages" in main_win._controls._object_items
+    item = main_win._controls._object_items["_show_blockages"]
+    assert not item.icon(1).isNull()
+
+
+
 

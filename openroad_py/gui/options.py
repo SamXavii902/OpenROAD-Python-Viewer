@@ -237,6 +237,15 @@ class DisplayOptions:
     def placementBlockageColor(self) -> QColor:
         return self._blockage_color
 
+    def setPlacementBlockageColor(self, color: QColor) -> None:
+        self._blockage_color = color
+
+    def blockageColor(self) -> QColor:
+        return self._blockage_color
+
+    def setBlockageColor(self, color: QColor) -> None:
+        self._blockage_color = color
+
     def placementBlockagePattern(self) -> Qt.BrushStyle:
         return Qt.BDiagPattern
 

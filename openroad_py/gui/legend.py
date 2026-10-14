@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QPushButton,
 )
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygonF
 from PySide6.QtCore import Qt, Signal, QPointF
 
 
@@ -28,6 +28,7 @@ class ClickableSwatch(QFrame):
         border_color: Optional[QColor] = None,
         is_dashed: bool = False,
         is_polygon: bool = False,
+        is_hatch: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -36,13 +37,14 @@ class ClickableSwatch(QFrame):
         self._border_color = border_color
         self._is_dashed = is_dashed
         self._is_polygon = is_polygon
+        self._is_hatch = is_hatch
         self.setFixedSize(30, 30)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("Click to open color wheel and customize layout color")
         self.update_style()
 
     def update_style(self) -> None:
-        if self._is_polygon:
+        if self._is_polygon or self._is_hatch:
             self.setStyleSheet(
                 "ClickableSwatch { background-color: #18181c; border: 1px solid #44444e; border-radius: 4px; } "
                 "ClickableSwatch:hover { border: 2px solid #FFFFFF; }"
@@ -60,6 +62,22 @@ class ClickableSwatch(QFrame):
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
+        if self._is_hatch:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, False)
+            b_col = self._border_color if self._border_color else self._color
+            # Draw dark background tile
+            painter.fillRect(3, 3, 24, 24, QColor(26, 26, 32))
+            # Draw diagonal hatch pattern matching OpenROAD placement blockage brush
+            hatch_brush = QBrush(self._color, Qt.BDiagPattern)
+            painter.fillRect(3, 3, 24, 24, hatch_brush)
+            # Draw outer border
+            painter.setPen(QPen(b_col, 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(3, 3, 23, 23)
+            painter.end()
+            return
+
         if not self._is_polygon:
             return
         painter = QPainter(self)
@@ -116,6 +134,7 @@ class LegendItem(QFrame):
         border_color: Optional[QColor] = None,
         is_dashed: bool = False,
         is_polygon: bool = False,
+        is_hatch: bool = False,
         on_color_changed: Optional[Callable[[QColor], None]] = None,
         parent=None,
     ):
@@ -139,6 +158,7 @@ class LegendItem(QFrame):
             border_color=border_color,
             is_dashed=is_dashed,
             is_polygon=is_polygon,
+            is_hatch=is_hatch,
             parent=self,
         )
         self._swatch.clicked.connect(self._open_color_picker)
@@ -262,7 +282,27 @@ class LegendDock(QDockWidget):
             )
         )
 
-        # 3. Routing Wires
+        # 3. Placement Blockages
+        def on_blockage_color(c: QColor):
+            opt = get_opt()
+            if opt:
+                opt.setPlacementBlockageColor(c)
+                repaint()
+
+        blockage_col = get_opt().placementBlockageColor() if get_opt() else QColor(100, 100, 100, 150)
+        item_layout.addWidget(
+            LegendItem(
+                "Placement Blockages",
+                "Physical keep-out areas prohibiting standard cell placement, rendered with diagonal hatch pattern.",
+                color=blockage_col,
+                is_filled=True,
+                border_color=QColor(160, 160, 160),
+                is_hatch=True,
+                on_color_changed=on_blockage_color,
+            )
+        )
+
+        # 4. Routing Wires
         def on_wire_color(c: QColor):
             if self._viewer and self._viewer.getChip():
                 tech = self._viewer.getChip().getTech()
