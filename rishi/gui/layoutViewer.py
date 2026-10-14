@@ -623,6 +623,16 @@ class LayoutViewer(QWidget):
         if len(pts) < 2 and p_start and p_end and (p_start.x != p_end.x or p_start.y != p_end.y):
             pts = [p_start, p_end]
 
+        if len(pts) >= 2:
+            tech = getattr(self._chip, "getTech", lambda: getattr(block, "getTech", lambda: None)())()
+            dbu_per_um = tech.getDbuPerMicron() if (tech and hasattr(tech, "getDbuPerMicron")) else 1000
+            manhattan_dbu = sum(
+                abs(pts[i + 1].x - pts[i].x) + abs(pts[i + 1].y - pts[i].y)
+                for i in range(len(pts) - 1)
+            )
+            if not getattr(path, "_has_routed_wire_shapes", False):
+                path.sum_wire_length = round(manhattan_dbu / float(dbu_per_um), 2)
+
         try:
             path._cached_points = pts
         except Exception:

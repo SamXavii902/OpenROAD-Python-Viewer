@@ -1015,10 +1015,26 @@ class PathDelayWaterfallWidget(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._path: Optional[TimingPath] = None
-        self.setFixedHeight(28)
+        self.setFixedHeight(34)
 
     def set_path(self, path: Optional[TimingPath]) -> None:
         self._path = path
+        if path:
+            total_delay = max(path.arrival_time, 0.05)
+            est_cell_delay = min(path.logic_level * 0.045, total_delay * 0.75) if path.logic_level > 0 else total_delay * 0.4
+            est_wire_delay = max(total_delay - est_cell_delay, 0.005)
+            cell_pct = int(round((est_cell_delay / total_delay) * 100))
+            cell_pct = min(max(cell_pct, 1), 99)
+            wire_pct = 100 - cell_pct
+            self.setToolTip(
+                f"Path {path.id} Delay Waterfall Breakdown:\n"
+                f"• Gate (Cell) Delay: {est_cell_delay:.4f} ns ({cell_pct}%)\n"
+                f"• Wire (Net) Delay: {est_wire_delay:.4f} ns ({wire_pct}%)\n"
+                f"• Total Data Arrival: {total_delay:.4f} ns\n"
+                f"• Logic Depth: {path.logic_level} levels"
+            )
+        else:
+            self.setToolTip("")
         self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -1040,32 +1056,64 @@ class PathDelayWaterfallWidget(QWidget):
             p = self._path
             total_delay = max(p.arrival_time, 0.05)
             est_cell_delay = min(p.logic_level * 0.045, total_delay * 0.75) if p.logic_level > 0 else total_delay * 0.4
-            est_wire_delay = max(total_delay - est_cell_delay, 0.01)
-            cell_pct = int((est_cell_delay / total_delay) * 100)
+            est_wire_delay = max(total_delay - est_cell_delay, 0.005)
+            cell_pct = int(round((est_cell_delay / total_delay) * 100))
+            cell_pct = min(max(cell_pct, 1), 99)
             wire_pct = 100 - cell_pct
 
-            pad_x = 6
-            pad_y = 5
+            pad_x = 8
             bar_w = w - 2 * pad_x
-            bar_h = h - 2 * pad_y
+
+            # --- Row 1: Header Labels (ALWAYS visible regardless of bar width) ---
+            painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+
+            # Left: Gate Delay label
+            gate_str = f"■ Gate Delay: {cell_pct}% ({est_cell_delay:.2f}ns)"
+            painter.setPen(QColor("#B388FF"))
+            painter.drawText(QRectF(pad_x, 2, bar_w / 3.0, 14), Qt.AlignLeft | Qt.AlignVCenter, gate_str)
+
+            # Center: Total Arrival
+            tot_str = f"Total Arrival: {total_delay:.2f}ns"
+            painter.setPen(QColor("#94A3B8"))
+            painter.drawText(QRectF(pad_x + bar_w / 3.0, 2, bar_w / 3.0, 14), Qt.AlignCenter, tot_str)
+
+            # Right: Wire Delay label
+            wire_str = f"■ Wire Delay: {wire_pct}% ({est_wire_delay:.2f}ns)"
+            painter.setPen(QColor("#FFA726"))
+            painter.drawText(QRectF(pad_x + 2 * (bar_w / 3.0), 2, bar_w / 3.0, 14), Qt.AlignRight | Qt.AlignVCenter, wire_str)
+
+            # --- Row 2: Proportional Stacked Bar ---
+            bar_y = 18
+            bar_h = 10
 
             cell_w = (cell_pct / 100.0) * bar_w
             wire_w = bar_w - cell_w
 
-            # Cell delay segment (Purple)
-            painter.fillRect(QRectF(pad_x, pad_y, cell_w, bar_h), QColor("#7C4DFF"))
-            # Wire delay segment (Orange)
-            painter.fillRect(QRectF(pad_x + cell_w, pad_y, wire_w, bar_h), QColor("#FF9100"))
+            # Cell delay segment (Purple Gradient)
+            grad_cell = QLinearGradient(pad_x, bar_y, pad_x + cell_w, bar_y)
+            grad_cell.setColorAt(0.0, QColor("#7C4DFF"))
+            grad_cell.setColorAt(1.0, QColor("#651FFF"))
+            painter.fillRect(QRectF(pad_x, bar_y, cell_w, bar_h), grad_cell)
 
-            painter.setPen(QPen(QColor("#1A1D24"), 1))
-            painter.drawRect(QRectF(pad_x, pad_y, bar_w, bar_h))
+            # Wire delay segment (Orange Gradient)
+            grad_wire = QLinearGradient(pad_x + cell_w, bar_y, pad_x + bar_w, bar_y)
+            grad_wire.setColorAt(0.0, QColor("#FF9100"))
+            grad_wire.setColorAt(1.0, QColor("#FF6D00"))
+            painter.fillRect(QRectF(pad_x + cell_w, bar_y, wire_w, bar_h), grad_wire)
 
-            painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+            # Bar border and divider
+            painter.setPen(QPen(QColor("#242834"), 1))
+            painter.drawRect(QRectF(pad_x, bar_y, bar_w, bar_h))
+            if 0 < cell_w < bar_w:
+                painter.drawLine(int(pad_x + cell_w), bar_y, int(pad_x + cell_w), bar_y + bar_h)
+
+            # Optional in-bar percentage labels if wide enough
+            painter.setFont(QFont("Segoe UI", 6, QFont.Bold))
             painter.setPen(QColor("#FFFFFF"))
-            if cell_w > 90:
-                painter.drawText(QRectF(pad_x + 6, pad_y, cell_w - 12, bar_h), Qt.AlignLeft | Qt.AlignVCenter, f"Gate Delay: {cell_pct}% ({est_cell_delay:.2f}ns)")
-            if wire_w > 90:
-                painter.drawText(QRectF(pad_x + cell_w + 6, pad_y, wire_w - 12, bar_h), Qt.AlignLeft | Qt.AlignVCenter, f"Wire Delay: {wire_pct}% ({est_wire_delay:.2f}ns)")
+            if cell_w > 40:
+                painter.drawText(QRectF(pad_x, bar_y, cell_w, bar_h), Qt.AlignCenter, f"{cell_pct}%")
+            if wire_w > 40:
+                painter.drawText(QRectF(pad_x + cell_w, bar_y, wire_w, bar_h), Qt.AlignCenter, f"{wire_pct}%")
 
         finally:
             painter.end()
@@ -1753,6 +1801,20 @@ class PathListTable(QWidget):
             self._table.blockSignals(False)
             self._is_refreshing = False
 
+    def update_path_wirelength(self, path: TimingPath) -> None:
+        """Dynamically updates the wirelength display in the table for the given path."""
+        if path is None or path.sum_wire_length is None:
+            return
+        wl_str = f"{path.sum_wire_length:,.2f} µm"
+        for row in range(self._table.rowCount()):
+            pid_item = self._table.item(row, 1)
+            if pid_item and pid_item.text() == str(path.id):
+                item_wl = self._table.item(row, 6)
+                if item_wl:
+                    item_wl.setText(wl_str)
+                    item_wl.setToolTip(f"Estimated / Routed Wire Length: {wl_str}")
+                break
+
     def _on_selection_changed(self) -> None:
         if self._is_refreshing or self._table.signalsBlocked():
             return
@@ -2195,10 +2257,7 @@ class TimingReportWidget(QWidget):
 
         # If a chip is already attached, calculate wire lengths
         if self._chip is not None:
-            mbit_alias = None
-            if self._layout_viewer and hasattr(self._layout_viewer, "_get_mbit_alias"):
-                mbit_alias = self._layout_viewer._get_mbit_alias()
-            self._report_data.compute_wire_lengths(self._chip, mbit_alias=mbit_alias)
+            self._report_data.compute_wire_lengths(self._chip, layout_viewer=self._layout_viewer)
 
         # Update Visualizers
         self._hist_widget.set_bins(report.histogram_bins)
@@ -2250,10 +2309,7 @@ class TimingReportWidget(QWidget):
         if chip is None:
             return
         if self._report_data is not None:
-            mbit_alias = None
-            if self._layout_viewer and hasattr(self._layout_viewer, "_get_mbit_alias"):
-                mbit_alias = self._layout_viewer._get_mbit_alias()
-            self._report_data.compute_wire_lengths(chip, mbit_alias=mbit_alias)
+            self._report_data.compute_wire_lengths(chip, layout_viewer=self._layout_viewer)
             self._apply_filters()
 
     def clear(self) -> None:
@@ -2369,6 +2425,9 @@ class TimingReportWidget(QWidget):
         self._search_input.setText(launch_clk)
 
     def _on_path_selected(self, path: TimingPath, zoom: bool) -> None:
+        if path is not None and self._layout_viewer and hasattr(self._layout_viewer, "_resolve_timing_path_points"):
+            self._layout_viewer._resolve_timing_path_points(path)
+            self._path_list.update_path_wirelength(path)
         self._waterfall_widget.set_path(path)
         self._scatter_widget.set_selected_path(path)
         self.path_selected.emit(path, zoom)

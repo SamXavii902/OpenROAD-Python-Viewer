@@ -113,3 +113,96 @@ def test_parse_real_route_reg2reg():
     failing_filtered = report.filter_paths(only_failing=True)
     assert len(failing_filtered) == 5
 
+
+def test_compute_wire_lengths_multi_hop_route():
+    """Verifies that wire length calculation sums point-to-point Manhattan segments
+    visiting all intermediate logic cells along the route, rather than shortcutting
+    directly from startpoint to endpoint.
+    """
+    class MockBox:
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+        def center(self):
+            return self
+
+    class MockBBox:
+        def __init__(self, x, y):
+            self._b = MockBox(x, y)
+        def getBox(self):
+            return self._b
+
+    class MockInst:
+        def __init__(self, name, x, y):
+            self._name = name
+            self._bbox = MockBBox(x, y)
+        def getName(self):
+            return self._name
+        def isPlaced(self):
+            return True
+        def getBBox(self):
+            return self._bbox
+
+    class MockTech:
+        def getDbuPerMicron(self):
+            return 1000
+
+    class MockBlock:
+        def __init__(self, insts):
+            self._insts = {i.getName(): i for i in insts}
+            self._insts_by_name = self._insts
+        def findInst(self, name):
+            return self._insts.get(name)
+        def findBTerm(self, name):
+            return None
+        def findNet(self, name):
+            return None
+        def getInsts(self):
+            return list(self._insts.values())
+        def getTech(self):
+            return MockTech()
+
+    class MockChip:
+        def __init__(self, block):
+            self._block = block
+        def getBlock(self):
+            return self._block
+        def getTech(self):
+            return self._block.getTech()
+
+    # Layout coordinates:
+    # reg0 at (0, 0)
+    # u_inv1 at (10000, 50000)   -- detour 1
+    # u_inv2 at (50000, 10000)   -- detour 2
+    # reg1 at (10000, 10000)
+    insts = [
+        MockInst("reg0", 0, 0),
+        MockInst("u_inv1", 10000, 50000),
+        MockInst("u_inv2", 50000, 10000),
+        MockInst("reg1", 10000, 10000),
+    ]
+    chip = MockChip(MockBlock(insts))
+
+    path = TimingPath(
+        id=1,
+        slack=0.01,
+        required_time=5.0,
+        startpoint="reg0/CP",
+        endpoint="reg1/D",
+        cells=[("INV", "u_inv1/Z"), ("INV", "u_inv2/Z")],
+        nets=["n1", "n2", "n3"],
+    )
+    report = TimingReportData(paths=[path])
+
+    report.compute_wire_lengths(chip)
+
+    # Direct start (0, 0) to end (10000, 10000) Manhattan distance is 20.0 um.
+    # Route via intermediate cells:
+    # (0, 0) -> (10000, 50000) = 10000 + 50000 = 60000 dbu (60 um)
+    # (10000, 50000) -> (50000, 10000) = 40000 + 40000 = 80000 dbu (80 um)
+    # (50000, 10000) -> (10000, 10000) = 40000 + 0 = 40000 dbu (40 um)
+    # Total route Manhattan sum = 180,000 dbu = 180.0 um!
+    assert path.sum_wire_length == 180.0
+    assert path.sum_wire_length > 20.0
+
+

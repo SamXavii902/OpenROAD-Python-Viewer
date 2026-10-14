@@ -112,6 +112,12 @@ def test_path_list_table_columns_and_pagination(qapp):
     assert w._page_index == 0
     assert w._table.rowCount() == 50
 
+    # Test dynamic wire length update
+    p_test = synthetic_paths[0]
+    p_test.sum_wire_length = 3456.78
+    w.update_path_wirelength(p_test)
+    assert w._table.item(0, 6).text() == "3,456.78 µm"
+
 
 @pytest.mark.skipif(not os.path.exists(TARPT_PATH), reason="route_reg2reg.tarpt not found")
 def test_timing_report_widget_full_load(qapp):

@@ -138,9 +138,15 @@ class TimingReportData:
 
         return result
 
-    def compute_wire_lengths(self, chip: Any, mbit_alias: Optional[Dict[str, Any]] = None) -> None:
+    def compute_wire_lengths(
+        self,
+        chip: Any,
+        layout_viewer: Any = None,
+        mbit_alias: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Computes sum of routed wire lengths in microns for each path using dbBlock,
-        with automatic Manhattan scale distance fallback along data path pins if nets are unrouted/absent.
+        with automatic Manhattan scale distance fallback along the full physical route
+        visiting all intermediate logic cells if nets are unrouted/absent.
         """
         if not chip:
             return
@@ -154,12 +160,68 @@ class TimingReportData:
         tech = getattr(chip, "getTech", lambda: getattr(block, "getTech", lambda: None)())()
         dbu_per_um = tech.getDbuPerMicron() if (tech and hasattr(tech, "getDbuPerMicron")) else 1000
 
-        # Build multi-bit alias map if not supplied
-        if mbit_alias is None:
+        # Check if design has routed wire shapes in regular signal nets
+        has_routed_nets = False
+        net_lengths: Dict[str, float] = {}
+        for path in self.paths[:10]:
+            for net_name in path.nets[:5]:
+                net = block.findNet(net_name)
+                if net and getattr(net, "getWireShapes", lambda: [])():
+                    has_routed_nets = True
+                    break
+            if has_routed_nets:
+                break
+
+        if has_routed_nets:
+            for path in self.paths:
+                total_um = 0.0
+                for net_name in path.nets:
+                    if net_name in net_lengths:
+                        total_um += net_lengths[net_name]
+                        continue
+                    net = block.findNet(net_name)
+                    length_um = 0.0
+                    if net:
+                        for ws in getattr(net, "getWireShapes", lambda: [])():
+                            if not getattr(ws, "is_via", False):
+                                box = ws.box
+                                length_um += max(box.dx(), box.dy()) / float(dbu_per_um)
+                    net_lengths[net_name] = length_um
+                    total_um += length_um
+                if total_um > 0:
+                    path.sum_wire_length = round(total_um, 2)
+                    path._has_routed_wire_shapes = True
+
+        # If layout_viewer is provided and can resolve paths, use it directly for paths needing wire length
+        if layout_viewer is not None and hasattr(layout_viewer, "_resolve_timing_path_points"):
+            for path in self.paths:
+                if getattr(path, "_has_routed_wire_shapes", False):
+                    continue
+                pts = layout_viewer._resolve_timing_path_points(path)
+                if len(pts) >= 2:
+                    manhattan_dbu = sum(
+                        abs(pts[i + 1].x - pts[i].x) + abs(pts[i + 1].y - pts[i].y)
+                        for i in range(len(pts) - 1)
+                    )
+                    path.sum_wire_length = round(manhattan_dbu / float(dbu_per_um), 2)
+            return
+
+        # Multi-bit and leaf alias maps for headless / standalone fallback
+        mbit_leaf_map: Dict[str, List[Any]] = {}
+        leaf_map: Dict[str, List[Any]] = {}
+
+        if layout_viewer is not None and hasattr(layout_viewer, "_ensure_alias_maps"):
+            layout_viewer._ensure_alias_maps()
+            mbit_alias = getattr(layout_viewer, "_mbit_alias", mbit_alias)
+            mbit_leaf_map = getattr(layout_viewer, "_mbit_leaf_map", {})
+            leaf_map = getattr(layout_viewer, "_leaf_map", {})
+        elif mbit_alias is None:
             mbit_alias = {}
             inst_dict = getattr(block, "_insts_by_name", None)
-            inst_items = inst_dict.items() if isinstance(inst_dict, dict) else []
+            inst_items = inst_dict.items() if isinstance(inst_dict, dict) else [(inst.getName(), inst) for inst in block.getInsts()]
             for iname, inst in inst_items:
+                leaf = iname.rsplit("/", 1)[-1] if "/" in iname else iname
+                leaf_map.setdefault(leaf, []).append(inst)
                 if "CDN_MBIT_" in iname:
                     if "/" in iname:
                         parent, base = iname.rsplit("/", 1)
@@ -171,8 +233,9 @@ class TimingReportData:
                         mbit_part = base.split("CDN_MBIT_", 1)[1]
                         for sub in mbit_part.split("_MB_"):
                             mbit_alias[f"{prefix}{sub}"] = inst
+                            mbit_leaf_map.setdefault(sub, []).append(inst)
 
-        # Fast pin location cache
+        # Fast pin location cache with 4-tier hierarchy resolution
         loc_cache: Dict[str, Optional[Tuple[int, int]]] = {}
         def get_pin_coord(pin_name: str) -> Optional[Tuple[int, int]]:
             if not pin_name:
@@ -180,9 +243,40 @@ class TimingReportData:
             if pin_name in loc_cache:
                 return loc_cache[pin_name]
             inst_name = pin_name.rsplit("/", 1)[0] if "/" in pin_name else pin_name
+
+            # 1. Exact full-name match in block
             inst = block.findInst(inst_name)
-            if inst is None:
+
+            # 2. Exact prefix + mbit sub-register match
+            if inst is None and mbit_alias:
                 inst = mbit_alias.get(inst_name)
+
+            # 3. Leaf multi-bit match with hierarchy disambiguation
+            if inst is None and mbit_leaf_map:
+                leaf = inst_name.rsplit("/", 1)[-1] if "/" in inst_name else inst_name
+                candidates = mbit_leaf_map.get(leaf)
+                if candidates:
+                    inst = candidates[0]
+                    if len(candidates) > 1 and "/" in inst_name:
+                        parent = inst_name.rsplit("/", 1)[0]
+                        for c in candidates:
+                            if parent in c.getName():
+                                inst = c
+                                break
+
+            # 4. Leaf placed cell fallback
+            if inst is None and leaf_map:
+                leaf = inst_name.rsplit("/", 1)[-1] if "/" in inst_name else inst_name
+                candidates = leaf_map.get(leaf)
+                if candidates:
+                    inst = candidates[0]
+                    if len(candidates) > 1 and "/" in inst_name:
+                        parent = inst_name.rsplit("/", 1)[0]
+                        for c in candidates:
+                            if parent in c.getName():
+                                inst = c
+                                break
+
             if inst and inst.isPlaced():
                 c = inst.getBBox().getBox().center()
                 pt = (c.x, c.y)
@@ -199,57 +293,28 @@ class TimingReportData:
             loc_cache[pin_name] = None
             return None
 
-        # Check if design has routed wire shapes in regular signal nets
-        has_routed_nets = False
-        net_lengths: Dict[str, float] = {}
-        for path in self.paths[:10]:
-            for net_name in path.nets[:5]:
-                net = block.findNet(net_name)
-                if net and getattr(net, "getWireShapes", lambda: [])():
-                    has_routed_nets = True
-                    break
-            if has_routed_nets:
-                break
-
         for path in self.paths:
-            total_um = 0.0
-            if has_routed_nets:
-                for net_name in path.nets:
-                    if net_name in net_lengths:
-                        total_um += net_lengths[net_name]
-                        continue
-                    net = block.findNet(net_name)
-                    length_um = 0.0
-                    if net:
-                        for ws in getattr(net, "getWireShapes", lambda: [])():
-                            if not getattr(ws, "is_via", False):
-                                box = ws.box
-                                length_um += max(box.dx(), box.dy()) / float(dbu_per_um)
-                    net_lengths[net_name] = length_um
-                    total_um += length_um
+            if getattr(path, "_has_routed_wire_shapes", False):
+                continue
+            pts: List[Tuple[int, int]] = []
+            p0 = get_pin_coord(path.startpoint)
+            if p0:
+                pts.append(p0)
+            for cell_master, pin_name in path.cells:
+                pt = get_pin_coord(pin_name)
+                if pt and (not pts or pt != pts[-1]):
+                    pts.append(pt)
+            pe = get_pin_coord(path.endpoint)
+            if pe and (not pts or pe != pts[-1]):
+                pts.append(pe)
 
-            # Fallback to Manhattan scale distance between placed pins along path
-            if total_um == 0.0:
-                pts: List[Tuple[int, int]] = []
-                p0 = get_pin_coord(path.startpoint)
-                if p0:
-                    pts.append(p0)
-                for cell_master, pin_name in path.cells:
-                    pt = get_pin_coord(pin_name)
-                    if pt and (not pts or pt != pts[-1]):
-                        pts.append(pt)
-                pe = get_pin_coord(path.endpoint)
-                if pe and (not pts or pe != pts[-1]):
-                    pts.append(pe)
-
-                if len(pts) >= 2:
-                    manhattan_dbu = sum(
-                        abs(pts[i + 1][0] - pts[i][0]) + abs(pts[i + 1][1] - pts[i][1])
-                        for i in range(len(pts) - 1)
-                    )
-                    total_um = manhattan_dbu / float(dbu_per_um)
-
-            path.sum_wire_length = round(total_um, 2) if total_um > 0 else None
+            if len(pts) >= 2:
+                manhattan_dbu = sum(
+                    abs(pts[i + 1][0] - pts[i][0]) + abs(pts[i + 1][1] - pts[i][1])
+                    for i in range(len(pts) - 1)
+                )
+                total_um = manhattan_dbu / float(dbu_per_um)
+                path.sum_wire_length = round(total_um, 2)
 
 
 class TarptParser:
