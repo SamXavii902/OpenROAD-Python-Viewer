@@ -272,6 +272,32 @@ def test_close_design_resets_state_and_memory(main_win):
     assert "Silicon Layout Viewer" in main_win.windowTitle()
 
 
+def test_macro_and_search_navigation_animations(main_win):
+    """Verifies that selecting a macro or search object triggers sonar radar ping."""
+    from rishi.odb.geom import Rect
+
+    viewer = main_win._viewer
+    viewer.resize(800, 600)
+
+    # Trigger macro navigation
+    main_win._on_macro_selected("TEST_MACRO", 1000, 2000, 5000, 6000)
+    assert len(viewer._sonar_rings) >= 1
+    macro_ring = viewer._sonar_rings[-1]
+    assert macro_ring["pt"].x == 3500
+    assert macro_ring["pt"].y == 5000
+    assert macro_ring["color"].name() == "#ffd700"  # Golden color
+
+    # Trigger search navigation
+    search_rect = Rect(10000, 20000, 15000, 25000)
+    main_win._on_search_object_selected(search_rect, "[CELL] u_alu")
+    assert len(viewer._sonar_rings) >= 2
+    search_ring = viewer._sonar_rings[-1]
+    assert search_ring["pt"].x == 12500
+    assert search_ring["pt"].y == 22500
+    assert search_ring["color"].name() == "#00e5ff"  # Cyan color
+
+
+
 
 
 

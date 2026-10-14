@@ -30,6 +30,7 @@ from PySide6.QtGui import (
     QPaintEvent,
     QPainter,
     QPen,
+    QWheelEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -285,7 +286,7 @@ class PathHistogramWidget(QWidget):
 # ==============================================================================
 
 class SlackScatterPlotWidget(QWidget):
-    """Interactive 2D scatter plot plotting Slack vs. Logic Depth."""
+    """Interactive 2D scatter plot plotting Slack vs. Logic Depth with zoom, pan, and dynamic axes."""
 
     path_selected = Signal(object, bool)  # (TimingPath, zoom_bool)
 
@@ -295,6 +296,21 @@ class SlackScatterPlotWidget(QWidget):
         self._hover_path: Optional[TimingPath] = None
         self._hover_pt: Optional[QPointF] = None
         self._selected_path: Optional[TimingPath] = None
+
+        # Zoom & Pan State
+        self._zoom_x_min: Optional[float] = None
+        self._zoom_x_max: Optional[float] = None
+        self._zoom_y_min: Optional[float] = None
+        self._zoom_y_max: Optional[float] = None
+
+        self._rubberband_origin: Optional[QPointF] = None
+        self._rubberband_current: Optional[QPointF] = None
+        self._panning: bool = False
+        self._pan_start_pos: Optional[QPointF] = None
+        self._pan_start_x_range: Optional[Tuple[float, float]] = None
+        self._pan_start_y_range: Optional[Tuple[float, float]] = None
+        self._btn_reset_rect: Optional[QRectF] = None
+
         self.setMouseTracking(True)
         self.setMinimumHeight(120)
 
@@ -302,10 +318,48 @@ class SlackScatterPlotWidget(QWidget):
         self._paths = list(paths)
         self._hover_path = None
         self._hover_pt = None
-        self.update()
+        self.reset_zoom()
 
     def set_selected_path(self, path: Optional[TimingPath]) -> None:
         self._selected_path = path
+        self.update()
+
+    def _get_base_bounds(self) -> Tuple[float, float, float, float]:
+        """Calculates default full extent (x_min, x_max, y_min, y_max)."""
+        max_logic = max(max((p.logic_level for p in self._paths), default=10), 10)
+        min_slack = min((p.slack for p in self._paths), default=-1.0)
+        max_slack = max((p.slack for p in self._paths), default=1.0)
+        slack_span = max(max_slack - min_slack, 0.2)
+        slack_pad = slack_span * 0.1
+        s_min = min_slack - slack_pad
+        s_max = max_slack + slack_pad
+        return 0.0, float(max_logic), s_min, s_max
+
+    def get_visible_bounds(self) -> Tuple[float, float, float, float]:
+        """Returns currently visible bounds (x_min, x_max, y_min, y_max)."""
+        base_xmin, base_xmax, base_ymin, base_ymax = self._get_base_bounds()
+        xmin = self._zoom_x_min if self._zoom_x_min is not None else base_xmin
+        xmax = self._zoom_x_max if self._zoom_x_max is not None else base_xmax
+        ymin = self._zoom_y_min if self._zoom_y_min is not None else base_ymin
+        ymax = self._zoom_y_max if self._zoom_y_max is not None else base_ymax
+        return xmin, xmax, ymin, ymax
+
+    def is_zoomed(self) -> bool:
+        return (
+            self._zoom_x_min is not None
+            or self._zoom_x_max is not None
+            or self._zoom_y_min is not None
+            or self._zoom_y_max is not None
+        )
+
+    def reset_zoom(self) -> None:
+        self._zoom_x_min = None
+        self._zoom_x_max = None
+        self._zoom_y_min = None
+        self._zoom_y_max = None
+        self._rubberband_origin = None
+        self._rubberband_current = None
+        self._panning = False
         self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -326,7 +380,7 @@ class SlackScatterPlotWidget(QWidget):
                 painter.drawText(self.rect(), Qt.AlignCenter, "No Timing Paths Loaded")
                 return
 
-            pad_left = 44
+            pad_left = 50
             pad_right = 20
             pad_top = 22
             pad_bottom = 26
@@ -336,47 +390,47 @@ class SlackScatterPlotWidget(QWidget):
             if plot_w <= 20 or plot_h <= 20:
                 return
 
-            max_logic = max(max((p.logic_level for p in self._paths), default=10), 10)
-            min_slack = min((p.slack for p in self._paths), default=-1.0)
-            max_slack = max((p.slack for p in self._paths), default=1.0)
-            slack_span = max(max_slack - min_slack, 0.2)
-            slack_pad = slack_span * 0.1
-            s_min = min_slack - slack_pad
-            s_max = max_slack + slack_pad
-            s_range = max(s_max - s_min, 1e-4)
+            xmin, xmax, ymin, ymax = self.get_visible_bounds()
+            x_range = max(xmax - xmin, 1.0)
+            y_range = max(ymax - ymin, 1e-4)
 
-            def to_screen(logic: int, slack: float) -> QPointF:
-                sx = pad_left + (logic / float(max_logic)) * plot_w
-                sy = pad_top + plot_h - ((slack - s_min) / float(s_range)) * plot_h
+            def to_screen(logic: float, slack: float) -> QPointF:
+                sx = pad_left + ((logic - xmin) / float(x_range)) * plot_w
+                sy = pad_top + plot_h - ((slack - ymin) / float(y_range)) * plot_h
                 return QPointF(sx, sy)
 
             grid_pen = QPen(QColor("#222630"), 1, Qt.DashLine)
             painter.setPen(grid_pen)
             painter.setFont(QFont("Segoe UI", 7))
 
-            # Y-axis ticks
+            # Dynamic Y-axis ticks
             num_y = 4
             for i in range(num_y + 1):
-                y_val = s_min + (i / float(num_y)) * s_range
+                y_val = ymin + (i / float(num_y)) * y_range
                 sy = pad_top + plot_h - (i / float(num_y)) * plot_h
                 painter.setPen(grid_pen)
                 painter.drawLine(pad_left, int(sy), pad_left + plot_w, int(sy))
                 painter.setPen(QColor("#707888"))
-                painter.drawText(2, int(sy) + 3, f"{y_val:>5.2f}")
+                fmt = f"{y_val:>+6.3f}" if y_range < 0.2 else f"{y_val:>+5.2f}"
+                painter.drawText(2, int(sy) + 3, fmt)
 
-            # X-axis ticks
+            # Dynamic X-axis ticks
             num_x = 4
             for i in range(num_x + 1):
-                x_val = int((i / float(num_x)) * max_logic)
+                x_val = xmin + (i / float(num_x)) * x_range
                 sx = pad_left + (i / float(num_x)) * plot_w
                 painter.setPen(grid_pen)
                 painter.drawLine(int(sx), pad_top, int(sx), pad_top + plot_h)
                 painter.setPen(QColor("#707888"))
-                painter.drawText(int(sx) - 8, h - 8, f"{x_val:>2}")
+                painter.drawText(int(sx) - 8, h - 8, f"{int(round(x_val)):>2}")
+
+            # Plot clipping area for data points and reference lines
+            painter.save()
+            painter.setClipRect(QRectF(pad_left, pad_top, plot_w, plot_h))
 
             # Zero-slack line
-            if s_min <= 0.0 <= s_max:
-                y0 = pad_top + plot_h - ((0.0 - s_min) / float(s_range)) * plot_h
+            if ymin <= 0.0 <= ymax:
+                y0 = to_screen(0, 0.0).y()
                 painter.setPen(QPen(QColor("#FF5252"), 1.2, Qt.DashLine))
                 painter.drawLine(pad_left, int(y0), pad_left + plot_w, int(y0))
 
@@ -384,11 +438,14 @@ class SlackScatterPlotWidget(QWidget):
                 painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
                 painter.setPen(QColor(255, 82, 82, 55))
                 painter.drawText(pad_left + 8, int(min(y0 + 16, h - 35)), "Placement Bound")
-                painter.drawText(pad_left + plot_w - 90, int(min(y0 + 16, h - 35)), "RTL Depth Bound")
+                painter.drawText(pad_left + plot_w - 95, int(min(y0 + 16, h - 35)), "RTL Depth Bound")
 
             # Draw scatter points
             for p in self._paths:
                 pt = to_screen(p.logic_level, p.slack)
+                if not (pad_left - 10 <= pt.x() <= pad_left + plot_w + 10 and pad_top - 10 <= pt.y() <= pad_top + plot_h + 10):
+                    continue
+
                 is_sel = (self._selected_path and self._selected_path.id == p.id)
 
                 if p.slack < 0:
@@ -411,60 +468,217 @@ class SlackScatterPlotWidget(QWidget):
                     painter.setBrush(base_col)
                     painter.drawEllipse(pt, radius, radius)
 
+            # Draw rubberband zoom rectangle if active
+            if self._rubberband_origin and self._rubberband_current:
+                rx = min(self._rubberband_origin.x(), self._rubberband_current.x())
+                ry = min(self._rubberband_origin.y(), self._rubberband_current.y())
+                rw = abs(self._rubberband_origin.x() - self._rubberband_current.x())
+                rh = abs(self._rubberband_origin.y() - self._rubberband_current.y())
+                rb_rect = QRectF(rx, ry, rw, rh)
+                painter.setPen(QPen(QColor("#00E5FF"), 1, Qt.DashLine))
+                painter.setBrush(QColor(0, 229, 255, 35))
+                painter.drawRect(rb_rect)
+
+            painter.restore()
+
             # Hover crosshair and tooltip card
             if self._hover_path and self._hover_pt:
                 hp = self._hover_path
                 spt = to_screen(hp.logic_level, hp.slack)
 
-                painter.setPen(QPen(QColor(0, 229, 255, 160), 1, Qt.DotLine))
-                painter.drawLine(pad_left, int(spt.y()), pad_left + plot_w, int(spt.y()))
-                painter.drawLine(int(spt.x()), pad_top, int(spt.x()), pad_top + plot_h)
+                if pad_left <= spt.x() <= pad_left + plot_w and pad_top <= spt.y() <= pad_top + plot_h:
+                    painter.setPen(QPen(QColor(0, 229, 255, 160), 1, Qt.DotLine))
+                    painter.drawLine(pad_left, int(spt.y()), pad_left + plot_w, int(spt.y()))
+                    painter.drawLine(int(spt.x()), pad_top, int(spt.x()), pad_top + plot_h)
 
-                wire_str = f" | Wire: {hp.sum_wire_length:,.0f} µm" if hp.sum_wire_length else ""
-                tt_text = f"Path {hp.id} | Slack: {hp.slack:+.4f} ns | Logic: {hp.logic_level}{wire_str}"
-                fm = painter.fontMetrics()
-                tt_w = fm.horizontalAdvance(tt_text) + 16
-                tt_h = fm.height() + 8
-                tt_x = min(max(spt.x() - tt_w / 2.0, 10.0), w - tt_w - 10.0)
-                tt_y = max(spt.y() - tt_h - 10.0, 6.0)
+                    wire_str = f" | Wire: {hp.sum_wire_length:,.0f} µm" if hp.sum_wire_length else ""
+                    tt_text = f"Path {hp.id} | Slack: {hp.slack:+.4f} ns | Logic: {hp.logic_level}{wire_str}"
+                    fm = painter.fontMetrics()
+                    tt_w = fm.horizontalAdvance(tt_text) + 16
+                    tt_h = fm.height() + 8
+                    tt_x = min(max(spt.x() - tt_w / 2.0, 10.0), w - tt_w - 10.0)
+                    tt_y = max(spt.y() - tt_h - 10.0, 6.0)
 
-                painter.setPen(QPen(QColor("#00E5FF"), 1))
-                painter.setBrush(QColor(15, 20, 28, 240))
-                painter.drawRoundedRect(QRectF(tt_x, tt_y, tt_w, tt_h), 4, 4)
+                    painter.setPen(QPen(QColor("#00E5FF"), 1))
+                    painter.setBrush(QColor(15, 20, 28, 240))
+                    painter.drawRoundedRect(QRectF(tt_x, tt_y, tt_w, tt_h), 4, 4)
 
-                painter.setPen(QColor("#FFFFFF"))
-                painter.drawText(QRectF(tt_x, tt_y, tt_w, tt_h), Qt.AlignCenter, tt_text)
+                    painter.setPen(QColor("#FFFFFF"))
+                    painter.drawText(QRectF(tt_x, tt_y, tt_w, tt_h), Qt.AlignCenter, tt_text)
 
             painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
             painter.setPen(QColor("#A0A8B8"))
             painter.drawText(pad_left, 14, "Slack (ns)")
             painter.drawText(pad_left + plot_w - 55, h - 8, "Logic Depth")
+
+            # Zoom indicator & Reset button pill
+            if self.is_zoomed():
+                btn_w = 95
+                btn_h = 16
+                btn_x = w - btn_w - 6
+                btn_y = 3
+                self._btn_reset_rect = QRectF(btn_x, btn_y, btn_w, btn_h)
+
+                painter.setPen(QPen(QColor("#00E5FF"), 0.8))
+                painter.setBrush(QColor(0, 229, 255, 30))
+                painter.drawRoundedRect(self._btn_reset_rect, 3, 3)
+
+                painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+                painter.setPen(QColor("#00E5FF"))
+                painter.drawText(self._btn_reset_rect, Qt.AlignCenter, "⟲ Reset Zoom")
+            else:
+                self._btn_reset_rect = None
         finally:
             painter.end()
 
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        pos = event.position()
+        pad_left = 50
+        pad_right = 20
+        pad_top = 22
+        pad_bottom = 26
+        plot_w = self.width() - pad_left - pad_right
+        plot_h = self.height() - pad_top - pad_bottom
+        if plot_w <= 0 or plot_h <= 0 or not self._paths:
+            return
+
+        if not (pad_left <= pos.x() <= pad_left + plot_w and pad_top <= pos.y() <= pad_top + plot_h):
+            return
+
+        xmin, xmax, ymin, ymax = self.get_visible_bounds()
+        x_range = xmax - xmin
+        y_range = ymax - ymin
+
+        cur_logic = xmin + ((pos.x() - pad_left) / float(plot_w)) * x_range
+        cur_slack = ymin + ((pad_top + plot_h - pos.y()) / float(plot_h)) * y_range
+
+        delta = event.angleDelta().y()
+        factor = 0.82 if delta > 0 else (1.0 / 0.82)
+
+        new_xmin = cur_logic - (cur_logic - xmin) * factor
+        new_xmax = cur_logic + (xmax - cur_logic) * factor
+        new_ymin = cur_slack - (cur_slack - ymin) * factor
+        new_ymax = cur_slack + (ymax - cur_slack) * factor
+
+        if (new_xmax - new_xmin) < 1.0 or (new_ymax - new_ymin) < 0.005:
+            return
+
+        self._zoom_x_min = max(new_xmin, 0.0)
+        self._zoom_x_max = max(new_xmax, self._zoom_x_min + 1.0)
+        self._zoom_y_min = new_ymin
+        self._zoom_y_max = max(new_ymax, new_ymin + 0.005)
+        self.update()
+        event.accept()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        pos = event.position()
+        if self._btn_reset_rect and self._btn_reset_rect.contains(pos):
+            self.reset_zoom()
+            return
+
+        if event.button() in (Qt.RightButton, Qt.MiddleButton):
+            self._panning = True
+            self._pan_start_pos = pos
+            bounds = self.get_visible_bounds()
+            self._pan_start_x_range = (bounds[0], bounds[1])
+            self._pan_start_y_range = (bounds[2], bounds[3])
+            return
+
+        if event.button() == Qt.LeftButton:
+            self._rubberband_origin = pos
+            self._rubberband_current = pos
+            self.update()
+        super().mousePressEvent(event)
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         pos = event.position()
+        if self._panning and self._pan_start_pos and self._pan_start_x_range and self._pan_start_y_range:
+            pad_left = 50
+            pad_right = 20
+            pad_top = 22
+            pad_bottom = 26
+            plot_w = max(self.width() - pad_left - pad_right, 10)
+            plot_h = max(self.height() - pad_top - pad_bottom, 10)
+
+            dx = pos.x() - self._pan_start_pos.x()
+            dy = pos.y() - self._pan_start_pos.y()
+
+            orig_xmin, orig_xmax = self._pan_start_x_range
+            orig_ymin, orig_ymax = self._pan_start_y_range
+            x_span = orig_xmax - orig_xmin
+            y_span = orig_ymax - orig_ymin
+
+            shift_x = -(dx / float(plot_w)) * x_span
+            shift_y = (dy / float(plot_h)) * y_span
+
+            self._zoom_x_min = max(orig_xmin + shift_x, 0.0)
+            self._zoom_x_max = self._zoom_x_min + x_span
+            self._zoom_y_min = orig_ymin + shift_y
+            self._zoom_y_max = orig_ymax + shift_y
+            self.update()
+            return
+
+        if self._rubberband_origin is not None:
+            self._rubberband_current = pos
+            self.update()
+            return
+
         old_hover = self._hover_path
         self._hover_path, self._hover_pt = self._hit_test(pos)
         if self._hover_path != old_hover:
             self.update()
         super().mouseMoveEvent(event)
 
-    def leaveEvent(self, event) -> None:
-        if self._hover_path is not None:
-            self._hover_path = None
-            self._hover_pt = None
-            self.update()
-        super().leaveEvent(event)
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() in (Qt.RightButton, Qt.MiddleButton):
+            self._panning = False
+            return
 
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.LeftButton:
-            hit, _ = self._hit_test(event.position())
-            if hit is not None:
-                self._selected_path = hit
-                self.path_selected.emit(hit, False)
+        if event.button() == Qt.LeftButton and self._rubberband_origin is not None:
+            pos = event.position()
+            orig = self._rubberband_origin
+            self._rubberband_origin = None
+            self._rubberband_current = None
+
+            pad_left = 50
+            pad_right = 20
+            pad_top = 22
+            pad_bottom = 26
+            plot_w = max(self.width() - pad_left - pad_right, 10)
+            plot_h = max(self.height() - pad_top - pad_bottom, 10)
+
+            dx = abs(pos.x() - orig.x())
+            dy = abs(pos.y() - orig.y())
+
+            if dx > 8 and dy > 8:
+                xmin, xmax, ymin, ymax = self.get_visible_bounds()
+                x_range = xmax - xmin
+                y_range = ymax - ymin
+
+                box_x1 = min(pos.x(), orig.x())
+                box_x2 = max(pos.x(), orig.x())
+                box_y1 = max(pos.y(), orig.y())
+                box_y2 = min(pos.y(), orig.y())
+
+                data_x1 = xmin + ((box_x1 - pad_left) / float(plot_w)) * x_range
+                data_x2 = xmin + ((box_x2 - pad_left) / float(plot_w)) * x_range
+                data_y1 = ymin + ((pad_top + plot_h - box_y1) / float(plot_h)) * y_range
+                data_y2 = ymin + ((pad_top + plot_h - box_y2) / float(plot_h)) * y_range
+
+                self._zoom_x_min = max(min(data_x1, data_x2), 0.0)
+                self._zoom_x_max = max(data_x1, data_x2)
+                self._zoom_y_min = min(data_y1, data_y2)
+                self._zoom_y_max = max(data_y1, data_y2)
                 self.update()
-        super().mousePressEvent(event)
+                return
+            else:
+                hit, _ = self._hit_test(pos)
+                if hit is not None:
+                    self._selected_path = hit
+                    self.path_selected.emit(hit, False)
+                    self.update()
+
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
@@ -473,14 +687,23 @@ class SlackScatterPlotWidget(QWidget):
                 self._selected_path = hit
                 self.path_selected.emit(hit, True)
                 self.update()
+            else:
+                self.reset_zoom()
         super().mouseDoubleClickEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self._hover_path is not None:
+            self._hover_path = None
+            self._hover_pt = None
+            self.update()
+        super().leaveEvent(event)
 
     def _hit_test(self, pos: QPointF) -> Tuple[Optional[TimingPath], Optional[QPointF]]:
         if not self._paths:
             return None, None
         w = self.width()
         h = self.height()
-        pad_left = 44
+        pad_left = 50
         pad_right = 20
         pad_top = 22
         pad_bottom = 26
@@ -489,21 +712,17 @@ class SlackScatterPlotWidget(QWidget):
         if plot_w <= 0 or plot_h <= 0:
             return None, None
 
-        max_logic = max(max((p.logic_level for p in self._paths), default=10), 10)
-        min_slack = min((p.slack for p in self._paths), default=-1.0)
-        max_slack = max((p.slack for p in self._paths), default=1.0)
-        slack_span = max(max_slack - min_slack, 0.2)
-        slack_pad = slack_span * 0.1
-        s_min = min_slack - slack_pad
-        s_range = max(max_slack + slack_pad - s_min, 1e-4)
+        xmin, xmax, ymin, ymax = self.get_visible_bounds()
+        x_range = max(xmax - xmin, 1.0)
+        y_range = max(ymax - ymin, 1e-4)
 
         best_p = None
         best_dist = 12.0
         best_pt = None
 
         for p in self._paths:
-            sx = pad_left + (p.logic_level / float(max_logic)) * plot_w
-            sy = pad_top + plot_h - ((p.slack - s_min) / float(s_range)) * plot_h
+            sx = pad_left + ((p.logic_level - xmin) / float(x_range)) * plot_w
+            sy = pad_top + plot_h - ((p.slack - ymin) / float(y_range)) * plot_h
             d = math.hypot(pos.x() - sx, pos.y() - sy)
             if d < best_dist:
                 best_dist = d

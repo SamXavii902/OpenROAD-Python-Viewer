@@ -456,3 +456,51 @@ def test_timing_report_upper_splitter(qapp):
     assert upper.count() == 2
 
 
+def test_slack_scatter_plot_zoom_and_dynamic_axes(qapp):
+    """Verifies that SlackScatterPlotWidget supports zoom, pan, dynamic bounds, and reset."""
+    from rishi.gui.timingReportWidget import SlackScatterPlotWidget
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtCore import QPointF, QPoint
+
+    w = SlackScatterPlotWidget()
+    w.resize(500, 300)
+
+    p1 = TimingPath(id=1, slack=-0.05, logic_level=5)
+    p2 = TimingPath(id=2, slack=0.20, logic_level=12)
+    w.set_paths([p1, p2])
+
+    assert not w.is_zoomed()
+    b_xmin, b_xmax, b_ymin, b_ymax = w.get_visible_bounds()
+    assert b_xmin == 0.0
+    assert b_xmax >= 12.0
+    assert b_ymin < -0.05
+    assert b_ymax > 0.20
+
+    # Simulate Wheel Zoom In centered at middle of plot (250, 150)
+    wheel_ev = QWheelEvent(
+        QPointF(250, 150),
+        QPointF(250, 150),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.NoButton,
+        Qt.NoModifier,
+        Qt.ScrollUpdate,
+        False,
+    )
+    w.wheelEvent(wheel_ev)
+    assert w.is_zoomed()
+
+    z_xmin, z_xmax, z_ymin, z_ymax = w.get_visible_bounds()
+    # Visible range should be narrower than full base range
+    assert (z_xmax - z_xmin) < (b_xmax - b_xmin)
+    assert (z_ymax - z_ymin) < (b_ymax - b_ymin)
+
+    # Reset zoom
+    w.reset_zoom()
+    assert not w.is_zoomed()
+    r_xmin, r_xmax, r_ymin, r_ymax = w.get_visible_bounds()
+    assert r_xmin == b_xmin
+    assert r_xmax == b_xmax
+
+
+

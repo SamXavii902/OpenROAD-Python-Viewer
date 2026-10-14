@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QDockWidget,
 )
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QColor
 from PySide6.QtCore import Qt
 import time
 from rishi.odb.database import dbDatabase
@@ -820,27 +820,30 @@ class MainWindow(QMainWindow):
         )
 
     def _on_macro_selected(self, inst_or_name, *args) -> None:
-        """Zooms layout viewer directly to the bounding box of the selected macro."""
+        """Zooms layout viewer smoothly to the bounding box of the selected macro with sonar ping."""
         if args and len(args) == 4:
             inst_name = str(inst_or_name)
             x, y, w, h = args
             box = Rect(x, y, x + w, y + h)
-            self._viewer.zoomTo(box)
+            self._viewer.zoomTo(box, animate=self._viewer.isVisible())
             self._viewer.highlightObject(box, f"[MACRO] {inst_name}")
+            self._viewer.pingLocation(box.center(), QColor(255, 215, 0))
             self._status_bar.showMessage(f"Focused on macro: {inst_name} ({w:,} x {h:,} DBU)", 4000)
         else:
             inst = inst_or_name
             if hasattr(inst, "getBBox"):
                 box = inst.getBBox().getBox()
-                self._viewer.zoomTo(box)
+                self._viewer.zoomTo(box, animate=self._viewer.isVisible())
                 self._viewer.selectInstance(inst)
+                self._viewer.pingLocation(box.center(), QColor(255, 215, 0))
                 self._inspector.inspect_instance(inst)
                 self._status_bar.showMessage(f"Focused on macro: {inst.getName()}", 4000)
 
     def _on_search_object_selected(self, rect: Rect, label: str) -> None:
-        """Navigates viewport directly to the object selected in the search widget."""
-        self._viewer.zoomTo(rect)
+        """Navigates viewport smoothly to the object selected in the search widget with sonar ping."""
+        self._viewer.zoomTo(rect, animate=self._viewer.isVisible())
         self._viewer.highlightObject(rect, label)
+        self._viewer.pingLocation(rect.center(), QColor(0, 229, 255))
         self._status_bar.showMessage(f"Navigated to {label}", 4000)
 
     def _on_search_objects_selected(self, items: List[tuple]) -> None:
