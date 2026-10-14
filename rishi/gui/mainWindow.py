@@ -150,6 +150,12 @@ class MainWindow(QMainWindow):
         export_img_act.triggered.connect(self._export_layout_image)
         file_menu.addAction(export_img_act)
 
+        close_design_act = QAction("&Close Design", self)
+        close_design_act.setShortcut(QKeySequence("Ctrl+W"))
+        close_design_act.setStatusTip("Close current design, free memory, and start fresh")
+        close_design_act.triggered.connect(self.close_design)
+        file_menu.addAction(close_design_act)
+
         # Sample Designs Submenu
         samples_menu = file_menu.addMenu("&Load Sample Design")
         self._add_sample_actions(samples_menu)
@@ -331,6 +337,7 @@ class MainWindow(QMainWindow):
 
     def load_design_files(self, lef_paths: List[str], def_path: str) -> None:
         """Loads a complete design (LEF + DEF) with smooth progress dialog feedback."""
+        self.close_design(silent=True)
         progress = QProgressDialog("Initializing design database...", "Cancel", 0, 100, self)
         progress.setWindowTitle("Loading Physical Design")
         progress.setWindowModality(Qt.WindowModal)
@@ -592,6 +599,16 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         try:
+            if self._def_file is not None or (self._db and self._db.getChip() and self._db.getChip().getBlock()):
+                if hasattr(self, "_viewer") and self._viewer is not None:
+                    self._viewer.setChip(None)
+                if hasattr(self, "_timing_dock") and self._timing_dock is not None:
+                    self._timing_dock.clear()
+                if hasattr(self, "_search_dock") and self._search_dock is not None:
+                    self._search_dock.clear()
+                if hasattr(self, "_inspector") and self._inspector is not None:
+                    self._inspector.clear()
+
             progress.setValue(1)
             progress.setLabelText(f"Parsing layout from {def_base}...")
             QApplication.processEvents()
@@ -980,6 +997,41 @@ class MainWindow(QMainWindow):
         self._timing_dock.setFeatures(features)
         state_str = "locked" if locked else "unlocked (movable & floatable)"
         self._status_bar.showMessage(f"Docks {state_str}", 3000)
+
+    def close_design(self, silent: bool = False) -> None:
+        """Closes the current design, halts render threads, clears spatial index and UI docks, and forces RAM release."""
+        # 1. Stop background rendering thread and clear viewer
+        if hasattr(self, "_viewer") and self._viewer is not None:
+            if hasattr(self._viewer, "_render_thread") and self._viewer._render_thread is not None:
+                self._viewer._render_thread.stop_render()
+            self._viewer.setChip(None)
+
+        # 2. Reset Docks
+        if hasattr(self, "_timing_dock") and self._timing_dock is not None:
+            self._timing_dock.clear()
+
+        if hasattr(self, "_search_dock") and self._search_dock is not None:
+            self._search_dock.clear()
+
+        if hasattr(self, "_inspector") and self._inspector is not None:
+            self._inspector.clear()
+
+        if hasattr(self, "_controls") and self._controls is not None:
+            self._controls.refresh()
+
+        # 3. Reset internal files and DB
+        self._lef_files = []
+        self._def_file = None
+        self._db = dbDatabase()
+
+        # 4. Trigger garbage collection to immediately reclaim RAM
+        import gc
+        gc.collect()
+
+        # 5. Reset UI title and status bar
+        self.setWindowTitle("RISHI - Silicon Layout Viewer")
+        if not silent:
+            self._status_bar.showMessage("Design closed. Memory cleared. Ready to start fresh.", 5000)
 
     def closeEvent(self, event) -> None:
         """Safely terminates background rendering threads when window closes."""

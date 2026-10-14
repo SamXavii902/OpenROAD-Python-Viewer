@@ -1,6 +1,7 @@
 """LayoutViewer widget ported from RISHI gui/src/layoutViewer.cpp with interactive measurement ruler and object highlighting."""
 
 import math
+import time
 from typing import Optional, Dict, List, Tuple, Callable, Any
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, Signal, QRect, QRectF, QPoint, QSize, QPointF, QLineF, QTimer
@@ -93,6 +94,28 @@ class LayoutViewer(QWidget):
         self._timing_path_points: List[Point] = []
         self._multi_path_points: List[List[Point]] = []
         self._mbit_alias: Optional[Dict[str, Any]] = None
+        self._mbit_leaf_map: Optional[Dict[str, List[Any]]] = None
+        self._leaf_map: Optional[Dict[str, List[Any]]] = None
+        self._timing_report_data: Optional[Any] = None
+        self._timing_connectivity: Dict[str, List[Point]] = {}
+
+        # 60 FPS Vector Animation Overlay Engine
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(16)  # ~60 FPS
+        self._anim_timer.timeout.connect(self._on_anim_frame)
+        self._anim_phase: float = 0.0
+
+        # Kinetic Camera Glide State
+        self._gliding: bool = False
+        self._glide_start_time: float = 0.0
+        self._glide_duration: float = 0.28  # 280ms
+        self._glide_src_center = Point(0, 0)
+        self._glide_dst_center = Point(0, 0)
+        self._glide_src_ppd: float = 1.0
+        self._glide_dst_ppd: float = 1.0
+
+        # Sonar Radar Ripple State
+        self._sonar_rings: List[Dict[str, Any]] = []
 
         # Background rendering thread (layoutViewer.cpp:125-259)
         self._render_thread = RenderThread(self)
@@ -114,6 +137,8 @@ class LayoutViewer(QWidget):
 
     def setChip(self, chip: Optional[dbChip], progress_callback: Optional[Callable[[str, int, int], None]] = None) -> None:
         self._chip = chip
+        self._pixmap = None
+        self._search.clear()
         self._cell_boxes.clear()
         self._rulers.clear()
         self._ruler_start = None
@@ -122,6 +147,13 @@ class LayoutViewer(QWidget):
         self._selected_inst = None
         self._flightlines.clear()
         self._mbit_alias = None
+        self._mbit_leaf_map = None
+        self._leaf_map = None
+        self._timing_connectivity.clear()
+        self._sonar_rings.clear()
+        self._gliding = False
+        if hasattr(self, "_anim_timer"):
+            self._anim_timer.stop()
         self.clearTimingPaths()
         self._density_bins = None
         self._density_image = None
@@ -131,9 +163,12 @@ class LayoutViewer(QWidget):
             self._options.tech_init(chip.getTech())
         if chip and chip.getBlock():
             self._search.build(chip.getBlock(), callback=progress_callback)
-            self._get_mbit_alias()
+            self._ensure_alias_maps()
             self.fit()
         else:
+            self.centering_shift = QPoint(0, 0)
+            self._pan_offset = QPoint(0, 0)
+            self.pixels_per_dbu = 1.0
             self.update()
 
     def getOptions(self) -> DisplayOptions:
@@ -268,8 +303,8 @@ class LayoutViewer(QWidget):
     def zoomOut(self) -> None:
         self.zoom(self._center, 1.0 / kZoomScaleFactor, debounce=False)
 
-    def zoomTo(self, rect: Rect) -> None:
-        """Zooms and centers viewport on the specified DBU rectangle."""
+    def zoomTo(self, rect: Rect, animate: bool = False) -> None:
+        """Zooms and centers viewport on the specified DBU rectangle with optional kinetic glide."""
         if not self.hasDesign() or rect.dx() <= 0 or rect.dy() <= 0:
             return
         padded = self.getPaddedRect(rect, factor=0.3)
@@ -277,14 +312,28 @@ class LayoutViewer(QWidget):
         h = max(self.height(), 100)
         new_ppd = self.computePixelsPerDBU(QSize(w, h), padded)
         new_ppd = max(1e-6, min(100.0, new_ppd))
-        self.pixels_per_dbu = new_ppd
-        center = rect.center()
-        cx = w / 2.0 - center.x * new_ppd
-        cy = h / 2.0 + center.y * new_ppd
-        self.centering_shift = QPoint(int(cx), int(cy))
-        self._pan_offset = QPoint(0, 0)
-        self.update()
-        self.fullRepaint()
+        target_center = rect.center()
+
+        if not animate or not self.isVisible() or self.pixels_per_dbu <= 0:
+            self.pixels_per_dbu = new_ppd
+            self._center = target_center
+            cx = w / 2.0 - target_center.x * new_ppd
+            cy = h / 2.0 + target_center.y * new_ppd
+            self.centering_shift = QPoint(int(cx), int(cy))
+            self._pan_offset = QPoint(0, 0)
+            self.update()
+            self.fullRepaint()
+            return
+
+        # Start smooth 280ms kinetic camera glide
+        self._glide_src_center = Point(self._center.x, self._center.y)
+        self._glide_dst_center = target_center
+        self._glide_src_ppd = self.pixels_per_dbu
+        self._glide_dst_ppd = new_ppd
+        self._glide_start_time = time.time()
+        self._glide_duration = 0.28
+        self._gliding = True
+        self._check_start_anim()
 
     def highlightObjects(self, items: List[Tuple[Rect, str]], zoom: bool = False) -> None:
         """Highlights multiple objects simultaneously with corner reticles."""
@@ -294,7 +343,7 @@ class LayoutViewer(QWidget):
             ymin = min(r.yMin() for r, _ in items)
             xmax = max(r.xMax() for r, _ in items)
             ymax = max(r.yMax() for r, _ in items)
-            self.zoomTo(Rect(xmin, ymin, xmax, ymax))
+            self.zoomTo(Rect(xmin, ymin, xmax, ymax), animate=self.isVisible())
         self.update()
 
     def highlightObject(self, rect: Optional[Rect], label: str = "", zoom: bool = False) -> None:
@@ -304,11 +353,78 @@ class LayoutViewer(QWidget):
         else:
             self.highlightObjects([(rect, label)], zoom=zoom)
 
+    def pingLocation(self, pt: Point, color: QColor = QColor(0, 229, 255)) -> None:
+        """Triggers an expanding radar sonar ripple at the specified DBU coordinate."""
+        self._sonar_rings.append({
+            "pt": pt,
+            "start_time": time.time(),
+            "duration": 0.45,
+            "max_radius": 36.0,
+            "color": color,
+        })
+        self._check_start_anim()
+
+    def _check_start_anim(self) -> None:
+        if not self._anim_timer.isActive():
+            self._anim_timer.start(16)
+
+    def _check_stop_anim(self) -> None:
+        has_active_path = self._active_timing_path is not None and len(self._timing_path_points) >= 2
+        if not self._gliding and not self._sonar_rings and not has_active_path:
+            if self._anim_timer.isActive():
+                self._anim_timer.stop()
+
+    def _on_anim_frame(self) -> None:
+        need_anim = False
+
+        # 1. Kinetic camera glide
+        if self._gliding:
+            now = time.time()
+            elapsed = now - self._glide_start_time
+            t = min(max(elapsed / max(self._glide_duration, 0.05), 0.0), 1.0)
+            ease = 1.0 - (1.0 - t) ** 3
+
+            cur_x = int((1.0 - ease) * self._glide_src_center.x + ease * self._glide_dst_center.x)
+            cur_y = int((1.0 - ease) * self._glide_src_center.y + ease * self._glide_dst_center.y)
+            self._center = Point(cur_x, cur_y)
+            self.pixels_per_dbu = (1.0 - ease) * self._glide_src_ppd + ease * self._glide_dst_ppd
+
+            w = max(self.width(), 100)
+            h = max(self.height(), 100)
+            cx = w / 2.0 - self._center.x * self.pixels_per_dbu
+            cy = h / 2.0 + self._center.y * self.pixels_per_dbu
+            self.centering_shift = QPoint(int(cx), int(cy))
+            self._pan_offset = QPoint(0, 0)
+
+            if t >= 1.0:
+                self._gliding = False
+                self.fullRepaint()
+            else:
+                need_anim = True
+
+        # 2. Sonar radar pings
+        if self._sonar_rings:
+            now = time.time()
+            self._sonar_rings = [r for r in self._sonar_rings if now - r["start_time"] < r["duration"]]
+            if self._sonar_rings:
+                need_anim = True
+
+        # 3. Active timing path traveling pulses
+        if self._active_timing_path is not None and len(self._timing_path_points) >= 2:
+            self._anim_phase = (self._anim_phase + 0.025) % 1.0
+            need_anim = True
+
+        if need_anim:
+            self.update()
+        else:
+            self._anim_timer.stop()
+
     def highlightTimingPath(self, path: Optional[Any], zoom: bool = False) -> None:
-        """Highlights a specific timing path with yellow directional flightlines and arrowheads."""
+        """Highlights a specific timing path with yellow directional flightlines, arrows, and flowing pulses."""
         if path is None:
             self._active_timing_path = None
             self._timing_path_points = []
+            self._check_stop_anim()
             self.update()
             return
 
@@ -329,7 +445,12 @@ class LayoutViewer(QWidget):
                 xmax + int(dx * 0.15),
                 ymax + int(dy * 0.15),
             )
-            self.zoomTo(rect)
+            self.zoomTo(rect, animate=self.isVisible())
+            self.pingLocation(pts[0], QColor(76, 175, 80))
+            if len(pts) > 1:
+                self.pingLocation(pts[-1], QColor(229, 57, 53))
+        else:
+            self._check_start_anim()
 
         self.update()
 
@@ -344,23 +465,31 @@ class LayoutViewer(QWidget):
         self.update()
 
     def clearTimingPaths(self) -> None:
-        """Clears all timing path overlays."""
+        """Clears all timing path overlays and stops vector pulse animation."""
         self._active_timing_path = None
         self._timing_path_points = []
         self._multi_path_points = []
+        self._check_stop_anim()
         self.update()
 
-    def _get_mbit_alias(self) -> Dict[str, Any]:
-        """Builds on-demand mapping from logical registers to physical multi-bit CDN_MBIT_ instances."""
-        if getattr(self, "_mbit_alias", None) is not None:
-            return self._mbit_alias
+    def _ensure_alias_maps(self) -> None:
+        """Builds on-demand fast indexes for exact, multi-bit, and leaf-level instances."""
+        if getattr(self, "_mbit_alias", None) is not None and getattr(self, "_mbit_leaf_map", None) is not None:
+            return
         self._mbit_alias = {}
+        self._mbit_leaf_map = {}
+        self._leaf_map = {}
         if not self.hasDesign():
-            return self._mbit_alias
+            return
         block = self._chip.getBlock()
         inst_dict = getattr(block, "_insts_by_name", None)
         inst_items = inst_dict.items() if isinstance(inst_dict, dict) else [(inst.getName(), inst) for inst in block.getInsts()]
         for name, inst in inst_items:
+            # Leaf index
+            leaf = name.rsplit("/", 1)[-1] if "/" in name else name
+            self._leaf_map.setdefault(leaf, []).append(inst)
+
+            # Multi-bit CDN_MBIT_ index
             if "CDN_MBIT_" in name:
                 if "/" in name:
                     parent, base = name.rsplit("/", 1)
@@ -372,10 +501,49 @@ class LayoutViewer(QWidget):
                     mbit_part = base.split("CDN_MBIT_", 1)[1]
                     for sub in mbit_part.split("_MB_"):
                         self._mbit_alias[f"{prefix}{sub}"] = inst
-        return self._mbit_alias
+                        self._mbit_leaf_map.setdefault(sub, []).append(inst)
+
+    def _get_mbit_alias(self) -> Dict[str, Any]:
+        """Backward-compatible accessor for multi-bit mapping."""
+        self._ensure_alias_maps()
+        return self._mbit_alias or {}
+
+    def setTimingReportData(self, report_data: Any) -> None:
+        """Stores timing report data and builds fast instance connectivity map."""
+        self._timing_report_data = report_data
+        self._timing_connectivity = {}
+        if report_data is None:
+            return
+
+        for p in getattr(report_data, "paths", []):
+            pts = self._resolve_timing_path_points(p)
+            if len(pts) >= 2:
+                names: List[Tuple[str, Point]] = []
+                if getattr(p, "startpoint", ""):
+                    sp_inst = p.startpoint.rsplit("/", 1)[0] if "/" in p.startpoint else p.startpoint
+                    names.append((sp_inst, pts[0]))
+                for idx, (cell, pin) in enumerate(getattr(p, "cells", [])):
+                    c_inst = pin.rsplit("/", 1)[0] if "/" in pin else pin
+                    pt_idx = min(idx + 1, len(pts) - 1)
+                    names.append((c_inst, pts[pt_idx]))
+                if getattr(p, "endpoint", ""):
+                    ep_inst = p.endpoint.rsplit("/", 1)[0] if "/" in p.endpoint else p.endpoint
+                    names.append((ep_inst, pts[-1]))
+
+                for i in range(len(names)):
+                    inst_n, pt_curr = names[i]
+                    leaf_n = inst_n.rsplit("/", 1)[-1]
+                    if i > 0:
+                        _, pt_prev = names[i - 1]
+                        self._timing_connectivity.setdefault(inst_n, []).append(pt_prev)
+                        self._timing_connectivity.setdefault(leaf_n, []).append(pt_prev)
+                    if i < len(names) - 1:
+                        _, pt_next = names[i + 1]
+                        self._timing_connectivity.setdefault(inst_n, []).append(pt_next)
+                        self._timing_connectivity.setdefault(leaf_n, []).append(pt_next)
 
     def _resolve_timing_path_points(self, path: Any) -> List[Point]:
-        """Resolves ordered physical DBU points along the timing path with caching."""
+        """Resolves ordered physical DBU points along the timing path with 2-tier caching."""
         if not self.hasDesign():
             return []
 
@@ -383,19 +551,51 @@ class LayoutViewer(QWidget):
         if hasattr(path, "_cached_points") and path._cached_points is not None:
             return path._cached_points
 
+        self._ensure_alias_maps()
         block = self._chip.getBlock()
         pts: List[Point] = []
-        alias_map = self._get_mbit_alias()
 
         def get_loc(pin_name: str) -> Optional[Point]:
             if not pin_name:
                 return None
             inst_name = pin_name.rsplit("/", 1)[0] if "/" in pin_name else pin_name
+
+            # 1. Exact full-name match in block
             inst = block.findInst(inst_name)
-            if inst is None:
-                inst = alias_map.get(inst_name)
+
+            # 2. Exact prefix + mbit sub-register match
+            if inst is None and self._mbit_alias:
+                inst = self._mbit_alias.get(inst_name)
+
+            # 3. Leaf multi-bit match with hierarchy disambiguation
+            if inst is None and self._mbit_leaf_map:
+                leaf = inst_name.rsplit("/", 1)[-1] if "/" in inst_name else inst_name
+                candidates = self._mbit_leaf_map.get(leaf)
+                if candidates:
+                    inst = candidates[0]
+                    if len(candidates) > 1 and "/" in inst_name:
+                        parent = inst_name.rsplit("/", 1)[0]
+                        for c in candidates:
+                            if parent in c.getName():
+                                inst = c
+                                break
+
+            # 4. Leaf placed cell fallback
+            if inst is None and self._leaf_map:
+                leaf = inst_name.rsplit("/", 1)[-1] if "/" in inst_name else inst_name
+                candidates = self._leaf_map.get(leaf)
+                if candidates:
+                    inst = candidates[0]
+                    if len(candidates) > 1 and "/" in inst_name:
+                        parent = inst_name.rsplit("/", 1)[0]
+                        for c in candidates:
+                            if parent in c.getName():
+                                inst = c
+                                break
+
             if inst and inst.isPlaced():
                 return inst.getBBox().getBox().center()
+
             bterm = block.findBTerm(pin_name)
             if bterm:
                 bbox = bterm.getBBox()
@@ -419,6 +619,10 @@ class LayoutViewer(QWidget):
         if p_end and (not pts or (p_end.x != pts[-1].x or p_end.y != pts[-1].y)):
             pts.append(p_end)
 
+        # Guaranteed minimum fallback: connect start and end directly if intermediate gates unplaced
+        if len(pts) < 2 and p_start and p_end and (p_start.x != p_end.x or p_start.y != p_end.y):
+            pts = [p_start, p_end]
+
         try:
             path._cached_points = pts
         except Exception:
@@ -427,11 +631,12 @@ class LayoutViewer(QWidget):
         return pts
 
     def selectInstance(self, inst: Optional[object]) -> None:
-        """Selects an instance in viewport, highlights it, and updates flightlines."""
+        """Selects an instance in viewport, highlights it, triggers sonar ping, and updates flightlines."""
         self._selected_inst = inst
         if inst is not None:
             box = inst.getBBox().getBox()
             self.highlightObject(box, inst.getName(), zoom=False)
+            self.pingLocation(box.center(), QColor(0, 229, 255))
         else:
             self.highlightObject(None)
         self._update_flightlines()
@@ -445,10 +650,13 @@ class LayoutViewer(QWidget):
         c1 = self._selected_inst.getBBox().getBox().center()
         max_lines = 400
         count = 0
+        has_signal_nets = False
+
         for iterm in self._selected_inst.getITerms():
             net = iterm.getNet()
             if net is None or net.isSpecial():
                 continue
+            has_signal_nets = True
             iterms = net.getITerms()
             net_lines = 0
             for other_it in iterms:
@@ -479,6 +687,21 @@ class LayoutViewer(QWidget):
                     count += 1
                 if count >= max_lines:
                     break
+
+        # Fallback for unrouted placement designs with 0 signal nets (e.g. eth_design):
+        if not has_signal_nets and self._timing_connectivity:
+            inst_name = self._selected_inst.getName()
+            leaf_name = inst_name.rsplit("/", 1)[-1]
+            targets = self._timing_connectivity.get(inst_name) or self._timing_connectivity.get(leaf_name) or []
+            seen = set()
+            for pt in targets:
+                k = (pt.x, pt.y)
+                if k not in seen and (pt.x != c1.x or pt.y != c1.y):
+                    seen.add(k)
+                    self._flightlines.append((c1, pt))
+                    count += 1
+                    if count >= max_lines:
+                        break
 
     def _ensure_density_image(self) -> None:
         """Precomputes high-performance 2D placement density gradient image across placed instances."""
@@ -710,6 +933,10 @@ class LayoutViewer(QWidget):
             if self._options.showDensityHeatmap():
                 self._draw_density_heatmap(painter)
 
+            # Sonar radar ripples overlay
+            if self._sonar_rings:
+                self._draw_sonar_rings(painter)
+
             # Ratsnest flightlines overlay
             self._draw_flightlines(painter)
 
@@ -727,6 +954,28 @@ class LayoutViewer(QWidget):
                 self._draw_scale_bar(painter)
         finally:
             painter.end()
+
+    def _draw_sonar_rings(self, painter: QPainter) -> None:
+        """Renders animated expanding sonar radar ripples around selected objects."""
+        if not self._sonar_rings:
+            return
+        now = time.time()
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        try:
+            for ring in self._sonar_rings:
+                elapsed = now - ring["start_time"]
+                t = min(max(elapsed / ring["duration"], 0.0), 1.0)
+                r = t * ring["max_radius"]
+                alpha = int(220 * (1.0 - t))
+                col = QColor(ring["color"])
+                col.setAlpha(alpha)
+                painter.setPen(QPen(col, 2.0))
+                painter.setBrush(Qt.NoBrush)
+                spt = self.dbuPointToScreen(ring["pt"])
+                painter.drawEllipse(spt, r, r)
+        finally:
+            painter.restore()
 
     def _draw_flightlines(self, painter: QPainter) -> None:
         """Renders ratsnest flightlines connecting selected instance to its connected sinks."""
@@ -803,6 +1052,27 @@ class LayoutViewer(QWidget):
                         painter.setBrush(QColor(255, 230, 0, 240))
                         painter.drawPolygon(arrow_poly)
 
+                # 3. Traveling electric signal photons along segments
+                for i in range(len(pts) - 1):
+                    sp1 = self.dbuPointToScreen(pts[i])
+                    sp2 = self.dbuPointToScreen(pts[i + 1])
+                    seg_dx = sp2.x() - sp1.x()
+                    seg_dy = sp2.y() - sp1.y()
+                    seg_len = math.hypot(seg_dx, seg_dy)
+                    if seg_len > 12:
+                        frac = (self._anim_phase + (i * 0.35)) % 1.0
+                        px = sp1.x() + seg_dx * frac
+                        py = sp1.y() + seg_dy * frac
+
+                        # Outer cyan halo
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(QColor(0, 229, 255, 80))
+                        painter.drawEllipse(QPointF(px, py), 6.0, 6.0)
+
+                        # Core photon
+                        painter.setBrush(QColor(0, 229, 255, 240))
+                        painter.drawEllipse(QPointF(px, py), 3.0, 3.0)
+
                 # Intermediate gate markers
                 painter.setBrush(QColor(255, 230, 0, 220))
                 painter.setPen(QPen(QColor(20, 20, 20), 1))
@@ -810,8 +1080,13 @@ class LayoutViewer(QWidget):
                     spt = self.dbuPointToScreen(pt)
                     painter.drawEllipse(spt, 3.5, 3.5)
 
-                # Startpoint marker (Green badge)
+                # Startpoint marker (Green badge with subtle breathing halo)
                 sp_start = self.dbuPointToScreen(pts[0])
+                halo_pulse = 2.5 * math.sin(self._anim_phase * 6.28318)
+                painter.setPen(QPen(QColor(76, 175, 80, 160), 1.5))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(sp_start, 7.0 + halo_pulse, 7.0 + halo_pulse)
+
                 painter.setBrush(QColor(76, 175, 80))
                 painter.setPen(QPen(Qt.white, 1.5))
                 painter.drawEllipse(sp_start, 7, 7)
@@ -819,8 +1094,12 @@ class LayoutViewer(QWidget):
                 painter.setPen(Qt.white)
                 painter.drawText(QRectF(sp_start.x() - 7, sp_start.y() - 7, 14, 14), Qt.AlignCenter, "S")
 
-                # Endpoint marker (Red badge)
+                # Endpoint marker (Red badge with subtle breathing halo)
                 sp_end = self.dbuPointToScreen(pts[-1])
+                painter.setPen(QPen(QColor(229, 57, 53, 160), 1.5))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(sp_end, 7.0 + halo_pulse, 7.0 + halo_pulse)
+
                 painter.setBrush(QColor(229, 57, 53))
                 painter.setPen(QPen(Qt.white, 1.5))
                 painter.drawEllipse(sp_end, 7, 7)

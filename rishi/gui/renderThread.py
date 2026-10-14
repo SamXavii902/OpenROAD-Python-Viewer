@@ -46,6 +46,17 @@ class RenderThread(QThread):
         self._draw_centering = QPoint(0, 0)
         self._is_rendering = False
 
+    def stop_render(self) -> None:
+        """Cancels any pending or active background render pass."""
+        try:
+            self._mutex.lock()
+            self._draw_rect = QRect()
+            self._restart = True
+            self._condition.wakeOne()
+            self._mutex.unlock()
+        except (RuntimeError, Exception):
+            pass
+
     def exit_thread(self) -> None:
         try:
             if not self.isRunning():

@@ -79,6 +79,10 @@ class InspectorDock(QDockWidget):
         self._macros_map = {}
         self._selected_item_grp: Optional[QTreeWidgetItem] = None
 
+    def clear(self) -> None:
+        """Clears all displayed metrics and design statistics."""
+        self.update_design(None)
+
     def update_design(self, chip: Optional[dbChip]) -> None:
         """Populates the tree with comprehensive design statistics."""
         self._tree.clear()

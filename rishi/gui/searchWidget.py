@@ -180,6 +180,10 @@ class SearchDock(QDockWidget):
 
         self.setWidget(content)
 
+    def clear(self) -> None:
+        """Empties all indexed objects and cached search results."""
+        self.setChip(None)
+
     def setChip(self, chip: Optional[dbChip]) -> None:
         """Re-indexes searchable design entities upon loading a chip."""
         self._chip = chip

@@ -237,5 +237,41 @@ def test_legend_and_controls_blockages(main_win):
     assert not item.icon(1).isNull()
 
 
+def test_close_design_resets_state_and_memory(main_win):
+    """Verifies that close_design resets viewer, docks, database, and status cleanly to start fresh."""
+    from rishi.odb.database import dbDatabase, dbChip
+    from rishi.odb.block import dbBlock
+    from rishi.odb.tech import dbTech
+    from rishi.odb.geom import Rect
+
+    db = dbDatabase()
+    tech = dbTech(1000)
+    db.setTech(tech)
+    block = dbBlock(tech, "testResetBlock")
+    block.setDieArea(Rect(0, 0, 100000, 100000))
+    chip = dbChip(db, block)
+
+    main_win._db = db
+    main_win._viewer.setChip(chip)
+    main_win._search_dock.setChip(chip)
+    main_win._inspector.update_design(chip)
+
+    assert main_win._viewer.hasDesign()
+    assert main_win._viewer.getChip() is not None
+
+    # Call close_design
+    main_win.close_design()
+
+    assert not main_win._viewer.hasDesign()
+    assert main_win._viewer.getChip() is None
+    assert main_win._viewer._pixmap is None
+    assert main_win._viewer.getSearch()._inst_boxes is None
+    assert len(main_win._viewer._flightlines) == 0
+    assert main_win._def_file is None
+    assert len(main_win._lef_files) == 0
+    assert "Silicon Layout Viewer" in main_win.windowTitle()
+
+
+
 
 

@@ -43,6 +43,21 @@ class SpatialSearch:
         self._rows: List[dbRow] = []
         self._row_boxes: Optional[np.ndarray] = None
 
+    def clear(self) -> None:
+        """Clears all indexed objects and frees numpy arrays and database references from memory."""
+        self._block = None
+        self._insts.clear()
+        self._inst_boxes = None
+        self._is_macro = None
+        self._route_shapes_by_layer.clear()
+        self._route_boxes_by_layer.clear()
+        self._obs_by_layer.clear()
+        self._obs_boxes_by_layer.clear()
+        self._blockages.clear()
+        self._blockage_boxes = None
+        self._rows.clear()
+        self._row_boxes = None
+
     def build(self, block: dbBlock, callback: Optional[Callable[[str, int, int], None]] = None) -> None:
         """Indexes all block objects for fast viewport querying."""
         self._block = block

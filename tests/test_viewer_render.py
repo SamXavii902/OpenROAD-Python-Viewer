@@ -10,6 +10,12 @@ from rishi.defin import DefParser
 from rishi.gui.layoutViewer import LayoutViewer
 
 
+DESIGNS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "designs")
+LEF_TECH_PATH = os.path.join(DESIGNS_DIR, "Nangate45", "Nangate45_tech.lef")
+LEF_STDCELL_PATH = os.path.join(DESIGNS_DIR, "Nangate45", "Nangate45_stdcell.lef")
+DEF_GCD_PATH = os.path.join(DESIGNS_DIR, "gcd", "gcd_nangate45_route.def")
+
+
 @pytest.fixture(scope="session")
 def qapp():
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -20,9 +26,9 @@ def qapp():
 
 
 def test_viewer_renders_routed_design(qapp):
-    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_tech.lef"
-    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_stdcell.lef"
-    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\src\odb\test\data\gcd\gcd_nangate45_route.def"
+    lef_path1 = LEF_TECH_PATH
+    lef_path2 = LEF_STDCELL_PATH
+    def_path = DEF_GCD_PATH
 
     assert os.path.exists(lef_path1)
     assert os.path.exists(lef_path2)
@@ -68,9 +74,9 @@ def test_viewer_renders_routed_design(qapp):
 
 
 def test_viewer_placement_density_heatmap(qapp):
-    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_tech.lef"
-    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_stdcell.lef"
-    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\src\odb\test\data\gcd\gcd_nangate45_route.def"
+    lef_path1 = LEF_TECH_PATH
+    lef_path2 = LEF_STDCELL_PATH
+    def_path = DEF_GCD_PATH
 
     db = dbDatabase()
     lef_parser = LefParser(db)
@@ -100,9 +106,9 @@ def test_viewer_placement_density_heatmap(qapp):
 
 
 def test_viewer_renders_iopins_with_layers_off(qapp):
-    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_tech.lef"
-    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_stdcell.lef"
-    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\src\odb\test\data\gcd\gcd_nangate45_route.def"
+    lef_path1 = LEF_TECH_PATH
+    lef_path2 = LEF_STDCELL_PATH
+    def_path = DEF_GCD_PATH
 
     db = dbDatabase()
     lef_parser = LefParser(db)
@@ -170,9 +176,9 @@ def test_viewer_renders_iopins_with_layers_off(qapp):
 
 
 def test_viewer_iopin_names_zoom_threshold(qapp):
-    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_tech.lef"
-    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_stdcell.lef"
-    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\src\odb\test\data\gcd\gcd_nangate45_route.def"
+    lef_path1 = LEF_TECH_PATH
+    lef_path2 = LEF_STDCELL_PATH
+    def_path = DEF_GCD_PATH
 
     db = dbDatabase()
     lef_parser = LefParser(db)
@@ -208,9 +214,9 @@ def test_viewer_iopin_names_zoom_threshold(qapp):
 
 
 def test_viewer_iopin_names_rotation_and_collision_avoidance(qapp):
-    lef_path1 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_tech.lef"
-    lef_path2 = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\test\Nangate45\Nangate45_stdcell.lef"
-    def_path = r"C:\Users\vamsi\.gemini\antigravity\brain\dcc520b6-4651-46e9-95a7-6eb33931842d\scratch\RISHI\src\odb\test\data\gcd\gcd_nangate45_route.def"
+    lef_path1 = LEF_TECH_PATH
+    lef_path2 = LEF_STDCELL_PATH
+    def_path = DEF_GCD_PATH
 
     db = dbDatabase()
     lef_parser = LefParser(db)

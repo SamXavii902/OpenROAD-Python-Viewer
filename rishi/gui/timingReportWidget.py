@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -277,6 +278,578 @@ class PathHistogramWidget(QWidget):
         if 0 <= idx < n_bins:
             return self._bins[idx]
         return None
+
+
+# ==============================================================================
+# 1b. Slack vs. Logic Depth Scatter Plot Widget (Bubble Chart)
+# ==============================================================================
+
+class SlackScatterPlotWidget(QWidget):
+    """Interactive 2D scatter plot plotting Slack vs. Logic Depth."""
+
+    path_selected = Signal(object, bool)  # (TimingPath, zoom_bool)
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._paths: List[TimingPath] = []
+        self._hover_path: Optional[TimingPath] = None
+        self._hover_pt: Optional[QPointF] = None
+        self._selected_path: Optional[TimingPath] = None
+        self.setMouseTracking(True)
+        self.setMinimumHeight(120)
+
+    def set_paths(self, paths: List[TimingPath]) -> None:
+        self._paths = list(paths)
+        self._hover_path = None
+        self._hover_pt = None
+        self.update()
+
+    def set_selected_path(self, path: Optional[TimingPath]) -> None:
+        self._selected_path = path
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        try:
+            w = self.width()
+            h = self.height()
+
+            # Background & border
+            painter.fillRect(0, 0, w, h, QColor("#16181D"))
+            painter.setPen(QPen(QColor("#2B2E38"), 1))
+            painter.drawRect(0, 0, w - 1, h - 1)
+
+            if not self._paths:
+                painter.setPen(QColor("#707888"))
+                painter.setFont(QFont("Segoe UI", 9))
+                painter.drawText(self.rect(), Qt.AlignCenter, "No Timing Paths Loaded")
+                return
+
+            pad_left = 44
+            pad_right = 20
+            pad_top = 22
+            pad_bottom = 26
+
+            plot_w = w - pad_left - pad_right
+            plot_h = h - pad_top - pad_bottom
+            if plot_w <= 20 or plot_h <= 20:
+                return
+
+            max_logic = max(max((p.logic_level for p in self._paths), default=10), 10)
+            min_slack = min((p.slack for p in self._paths), default=-1.0)
+            max_slack = max((p.slack for p in self._paths), default=1.0)
+            slack_span = max(max_slack - min_slack, 0.2)
+            slack_pad = slack_span * 0.1
+            s_min = min_slack - slack_pad
+            s_max = max_slack + slack_pad
+            s_range = max(s_max - s_min, 1e-4)
+
+            def to_screen(logic: int, slack: float) -> QPointF:
+                sx = pad_left + (logic / float(max_logic)) * plot_w
+                sy = pad_top + plot_h - ((slack - s_min) / float(s_range)) * plot_h
+                return QPointF(sx, sy)
+
+            grid_pen = QPen(QColor("#222630"), 1, Qt.DashLine)
+            painter.setPen(grid_pen)
+            painter.setFont(QFont("Segoe UI", 7))
+
+            # Y-axis ticks
+            num_y = 4
+            for i in range(num_y + 1):
+                y_val = s_min + (i / float(num_y)) * s_range
+                sy = pad_top + plot_h - (i / float(num_y)) * plot_h
+                painter.setPen(grid_pen)
+                painter.drawLine(pad_left, int(sy), pad_left + plot_w, int(sy))
+                painter.setPen(QColor("#707888"))
+                painter.drawText(2, int(sy) + 3, f"{y_val:>5.2f}")
+
+            # X-axis ticks
+            num_x = 4
+            for i in range(num_x + 1):
+                x_val = int((i / float(num_x)) * max_logic)
+                sx = pad_left + (i / float(num_x)) * plot_w
+                painter.setPen(grid_pen)
+                painter.drawLine(int(sx), pad_top, int(sx), pad_top + plot_h)
+                painter.setPen(QColor("#707888"))
+                painter.drawText(int(sx) - 8, h - 8, f"{x_val:>2}")
+
+            # Zero-slack line
+            if s_min <= 0.0 <= s_max:
+                y0 = pad_top + plot_h - ((0.0 - s_min) / float(s_range)) * plot_h
+                painter.setPen(QPen(QColor("#FF5252"), 1.2, Qt.DashLine))
+                painter.drawLine(pad_left, int(y0), pad_left + plot_w, int(y0))
+
+                # Quadrant helper watermark
+                painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+                painter.setPen(QColor(255, 82, 82, 55))
+                painter.drawText(pad_left + 8, int(min(y0 + 16, h - 35)), "Placement Bound")
+                painter.drawText(pad_left + plot_w - 90, int(min(y0 + 16, h - 35)), "RTL Depth Bound")
+
+            # Draw scatter points
+            for p in self._paths:
+                pt = to_screen(p.logic_level, p.slack)
+                is_sel = (self._selected_path and self._selected_path.id == p.id)
+
+                if p.slack < 0:
+                    base_col = QColor("#FF5252")
+                elif p.slack <= 0.15:
+                    base_col = QColor("#FFB74D")
+                else:
+                    base_col = QColor("#66BB6A")
+
+                radius = 3.5
+                if p.sum_wire_length and p.sum_wire_length > 0:
+                    radius = min(max(3.5 + (p.sum_wire_length / 2000.0), 3.5), 7.5)
+
+                if is_sel:
+                    painter.setPen(QPen(QColor("#FFE600"), 2))
+                    painter.setBrush(base_col)
+                    painter.drawEllipse(pt, radius + 2.0, radius + 2.0)
+                else:
+                    painter.setPen(QPen(QColor("#1A1D24"), 0.5))
+                    painter.setBrush(base_col)
+                    painter.drawEllipse(pt, radius, radius)
+
+            # Hover crosshair and tooltip card
+            if self._hover_path and self._hover_pt:
+                hp = self._hover_path
+                spt = to_screen(hp.logic_level, hp.slack)
+
+                painter.setPen(QPen(QColor(0, 229, 255, 160), 1, Qt.DotLine))
+                painter.drawLine(pad_left, int(spt.y()), pad_left + plot_w, int(spt.y()))
+                painter.drawLine(int(spt.x()), pad_top, int(spt.x()), pad_top + plot_h)
+
+                wire_str = f" | Wire: {hp.sum_wire_length:,.0f} µm" if hp.sum_wire_length else ""
+                tt_text = f"Path {hp.id} | Slack: {hp.slack:+.4f} ns | Logic: {hp.logic_level}{wire_str}"
+                fm = painter.fontMetrics()
+                tt_w = fm.horizontalAdvance(tt_text) + 16
+                tt_h = fm.height() + 8
+                tt_x = min(max(spt.x() - tt_w / 2.0, 10.0), w - tt_w - 10.0)
+                tt_y = max(spt.y() - tt_h - 10.0, 6.0)
+
+                painter.setPen(QPen(QColor("#00E5FF"), 1))
+                painter.setBrush(QColor(15, 20, 28, 240))
+                painter.drawRoundedRect(QRectF(tt_x, tt_y, tt_w, tt_h), 4, 4)
+
+                painter.setPen(QColor("#FFFFFF"))
+                painter.drawText(QRectF(tt_x, tt_y, tt_w, tt_h), Qt.AlignCenter, tt_text)
+
+            painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+            painter.setPen(QColor("#A0A8B8"))
+            painter.drawText(pad_left, 14, "Slack (ns)")
+            painter.drawText(pad_left + plot_w - 55, h - 8, "Logic Depth")
+        finally:
+            painter.end()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        pos = event.position()
+        old_hover = self._hover_path
+        self._hover_path, self._hover_pt = self._hit_test(pos)
+        if self._hover_path != old_hover:
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self._hover_path is not None:
+            self._hover_path = None
+            self._hover_pt = None
+            self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            hit, _ = self._hit_test(event.position())
+            if hit is not None:
+                self._selected_path = hit
+                self.path_selected.emit(hit, False)
+                self.update()
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            hit, _ = self._hit_test(event.position())
+            if hit is not None:
+                self._selected_path = hit
+                self.path_selected.emit(hit, True)
+                self.update()
+        super().mouseDoubleClickEvent(event)
+
+    def _hit_test(self, pos: QPointF) -> Tuple[Optional[TimingPath], Optional[QPointF]]:
+        if not self._paths:
+            return None, None
+        w = self.width()
+        h = self.height()
+        pad_left = 44
+        pad_right = 20
+        pad_top = 22
+        pad_bottom = 26
+        plot_w = w - pad_left - pad_right
+        plot_h = h - pad_top - pad_bottom
+        if plot_w <= 0 or plot_h <= 0:
+            return None, None
+
+        max_logic = max(max((p.logic_level for p in self._paths), default=10), 10)
+        min_slack = min((p.slack for p in self._paths), default=-1.0)
+        max_slack = max((p.slack for p in self._paths), default=1.0)
+        slack_span = max(max_slack - min_slack, 0.2)
+        slack_pad = slack_span * 0.1
+        s_min = min_slack - slack_pad
+        s_range = max(max_slack + slack_pad - s_min, 1e-4)
+
+        best_p = None
+        best_dist = 12.0
+        best_pt = None
+
+        for p in self._paths:
+            sx = pad_left + (p.logic_level / float(max_logic)) * plot_w
+            sy = pad_top + plot_h - ((p.slack - s_min) / float(s_range)) * plot_h
+            d = math.hypot(pos.x() - sx, pos.y() - sy)
+            if d < best_dist:
+                best_dist = d
+                best_p = p
+                best_pt = QPointF(sx, sy)
+
+        return best_p, best_pt
+
+
+# ==============================================================================
+# 1c. Critical Endpoint Pareto Chart (Top Violators Bar Chart)
+# ==============================================================================
+
+class EndpointParetoWidget(QWidget):
+    """Horizontal ranked bar chart showing Top Bottleneck Endpoints by WNS."""
+
+    endpoint_selected = Signal(str)
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._endpoints: List[Dict[str, Any]] = []
+        self._hover_idx: int = -1
+        self.setMouseTracking(True)
+        self.setMinimumHeight(120)
+
+    def set_paths(self, paths: List[TimingPath]) -> None:
+        ep_map: Dict[str, Dict[str, Any]] = {}
+        for p in paths:
+            ep = p.endpoint or "Unknown"
+            leaf = ep.rsplit("/", 1)[-1]
+            if leaf not in ep_map:
+                ep_map[leaf] = {"name": leaf, "full_name": ep, "count": 0, "failing": 0, "wns": 999.0}
+            ep_map[leaf]["count"] += 1
+            if p.slack < 0:
+                ep_map[leaf]["failing"] += 1
+            if p.slack < ep_map[leaf]["wns"]:
+                ep_map[leaf]["wns"] = p.slack
+
+        sorted_eps = sorted(ep_map.values(), key=lambda e: (e["wns"], -e["count"]))
+        self._endpoints = sorted_eps[:10]
+        self._hover_idx = -1
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        try:
+            w = self.width()
+            h = self.height()
+            painter.fillRect(0, 0, w, h, QColor("#16181D"))
+            painter.setPen(QPen(QColor("#2B2E38"), 1))
+            painter.drawRect(0, 0, w - 1, h - 1)
+
+            if not self._endpoints:
+                painter.setPen(QColor("#707888"))
+                painter.setFont(QFont("Segoe UI", 9))
+                painter.drawText(self.rect(), Qt.AlignCenter, "No Endpoint Data")
+                return
+
+            pad_left = 130
+            pad_right = 100
+            pad_top = 18
+            pad_bottom = 10
+
+            plot_w = w - pad_left - pad_right
+            n = len(self._endpoints)
+            row_h = max(min((h - pad_top - pad_bottom) / float(n), 20.0), 11.0)
+            bar_h = max(row_h - 4.0, 5.0)
+
+            max_mag = max(max(abs(e["wns"]) for e in self._endpoints), 0.1)
+
+            painter.setFont(QFont("Segoe UI", 7))
+            for i, e in enumerate(self._endpoints):
+                y = pad_top + i * row_h
+                is_hover = (i == self._hover_idx)
+
+                painter.setPen(QColor("#FFFFFF" if is_hover else "#A0A8B8"))
+                label_rect = QRectF(6, y, pad_left - 12, row_h)
+                painter.drawText(label_rect, Qt.AlignRight | Qt.AlignVCenter, e["name"][:18])
+
+                mag = abs(e["wns"])
+                bar_len = (mag / float(max_mag)) * plot_w
+                bar_rect = QRectF(pad_left, y + 2, bar_len, bar_h)
+
+                if e["wns"] < 0:
+                    grad = QLinearGradient(pad_left, y, pad_left + bar_len, y)
+                    grad.setColorAt(0.0, QColor("#D32F2F"))
+                    grad.setColorAt(1.0, QColor("#EF5350"))
+                    painter.setBrush(grad)
+                else:
+                    painter.setBrush(QColor("#43A047"))
+
+                painter.setPen(QPen(QColor("#00E5FF" if is_hover else "#2B2E38"), 1))
+                painter.drawRoundedRect(bar_rect, 2, 2)
+
+                val_str = f"{e['wns']:+.3f} ns [{e['count']}p]"
+                painter.setPen(QColor("#E2E8F0"))
+                painter.drawText(QRectF(pad_left + bar_len + 6, y, pad_right - 10, row_h), Qt.AlignLeft | Qt.AlignVCenter, val_str)
+
+        finally:
+            painter.end()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        idx = self._hit_test_row(event.position().y())
+        if idx != self._hover_idx:
+            self._hover_idx = idx
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self._hover_idx != -1:
+            self._hover_idx = -1
+            self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            idx = self._hit_test_row(event.position().y())
+            if 0 <= idx < len(self._endpoints):
+                self.endpoint_selected.emit(self._endpoints[idx]["name"])
+        super().mousePressEvent(event)
+
+    def _hit_test_row(self, y: float) -> int:
+        if not self._endpoints:
+            return -1
+        pad_top = 18
+        pad_bottom = 10
+        n = len(self._endpoints)
+        row_h = max(min((self.height() - pad_top - pad_bottom) / float(n), 20.0), 11.0)
+        idx = int((y - pad_top) / row_h)
+        if 0 <= idx < n:
+            return idx
+        return -1
+
+
+# ==============================================================================
+# 1d. Clock Domain Crossing (CDC) Matrix Widget
+# ==============================================================================
+
+class ClockMatrixWidget(QWidget):
+    """Interactive Launch Clock vs Capture Clock Crossing (CDC) Matrix."""
+
+    clock_pair_selected = Signal(str, str)
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._matrix: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._launch_clks: List[str] = []
+        self._capture_clks: List[str] = []
+        self._hover_cell: Optional[Tuple[int, int]] = None
+        self.setMouseTracking(True)
+        self.setMinimumHeight(120)
+
+    def set_paths(self, paths: List[TimingPath]) -> None:
+        l_set = set()
+        c_set = set()
+        matrix: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+        for p in paths:
+            l = p.launch_clock or "clk_in"
+            c = p.capture_clock or "clk_out"
+            l_set.add(l)
+            c_set.add(c)
+            key = (l, c)
+            if key not in matrix:
+                matrix[key] = {"launch": l, "capture": c, "count": 0, "failing": 0, "wns": 999.0}
+            matrix[key]["count"] += 1
+            if p.slack < 0:
+                matrix[key]["failing"] += 1
+            if p.slack < matrix[key]["wns"]:
+                matrix[key]["wns"] = p.slack
+
+        self._launch_clks = sorted(list(l_set))[:5]
+        self._capture_clks = sorted(list(c_set))[:5]
+        self._matrix = matrix
+        self._hover_cell = None
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        try:
+            w = self.width()
+            h = self.height()
+            painter.fillRect(0, 0, w, h, QColor("#16181D"))
+            painter.setPen(QPen(QColor("#2B2E38"), 1))
+            painter.drawRect(0, 0, w - 1, h - 1)
+
+            if not self._launch_clks or not self._capture_clks:
+                painter.setPen(QColor("#707888"))
+                painter.setFont(QFont("Segoe UI", 9))
+                painter.drawText(self.rect(), Qt.AlignCenter, "No Clock Domains Detected")
+                return
+
+            pad_left = 90
+            pad_top = 28
+            n_rows = len(self._launch_clks)
+            n_cols = len(self._capture_clks)
+
+            cell_w = max((w - pad_left - 10) / float(n_cols), 45.0)
+            cell_h = max((h - pad_top - 10) / float(n_rows), 18.0)
+
+            painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+            painter.setPen(QColor("#A0A8B8"))
+            for j, c in enumerate(self._capture_clks):
+                cx = pad_left + j * cell_w
+                painter.drawText(QRectF(cx, 8, cell_w, 18), Qt.AlignCenter, c[:10])
+
+            for i, l in enumerate(self._launch_clks):
+                ry = pad_top + i * cell_h
+                painter.setPen(QColor("#A0A8B8"))
+                painter.drawText(QRectF(6, ry, pad_left - 10, cell_h), Qt.AlignRight | Qt.AlignVCenter, l[:12])
+
+                for j, c in enumerate(self._capture_clks):
+                    cx = pad_left + j * cell_w
+                    cell_rect = QRectF(cx + 1, ry + 1, cell_w - 2, cell_h - 2)
+                    entry = self._matrix.get((l, c))
+                    is_hover = (self._hover_cell == (i, j))
+
+                    if entry:
+                        if entry["failing"] > 0:
+                            bg = QColor("#5A1818") if not is_hover else QColor("#802424")
+                            text_col = QColor("#FF8A80")
+                        else:
+                            bg = QColor("#17381E") if not is_hover else QColor("#22522C")
+                            text_col = QColor("#81C784")
+                        painter.fillRect(cell_rect, bg)
+                        painter.setPen(QPen(QColor("#00E5FF" if is_hover else "#2B2E38"), 1))
+                        painter.drawRect(cell_rect)
+
+                        painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+                        painter.setPen(text_col)
+                        txt = f"{entry['count']}p | {entry['wns']:+.2f}"
+                        painter.drawText(cell_rect, Qt.AlignCenter, txt)
+                    else:
+                        painter.fillRect(cell_rect, QColor("#1C1F26"))
+                        painter.setPen(QPen(QColor("#2B2E38"), 1))
+                        painter.drawRect(cell_rect)
+
+        finally:
+            painter.end()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        cell = self._hit_test_cell(event.position())
+        if cell != self._hover_cell:
+            self._hover_cell = cell
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self._hover_cell is not None:
+            self._hover_cell = None
+            self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            cell = self._hit_test_cell(event.position())
+            if cell:
+                i, j = cell
+                if 0 <= i < len(self._launch_clks) and 0 <= j < len(self._capture_clks):
+                    self.clock_pair_selected.emit(self._launch_clks[i], self._capture_clks[j])
+        super().mousePressEvent(event)
+
+    def _hit_test_cell(self, pos: QPointF) -> Optional[Tuple[int, int]]:
+        pad_left = 90
+        pad_top = 28
+        if pos.x() < pad_left or pos.y() < pad_top:
+            return None
+        n_rows = len(self._launch_clks)
+        n_cols = len(self._capture_clks)
+        if n_rows == 0 or n_cols == 0:
+            return None
+        cell_w = max((self.width() - pad_left - 10) / float(n_cols), 45.0)
+        cell_h = max((self.height() - pad_top - 10) / float(n_rows), 18.0)
+        j = int((pos.x() - pad_left) / cell_w)
+        i = int((pos.y() - pad_top) / cell_h)
+        if 0 <= i < n_rows and 0 <= j < n_cols:
+            return (i, j)
+        return None
+
+
+# ==============================================================================
+# 1e. Selected Path Delay Waterfall Inspector Widget
+# ==============================================================================
+
+class PathDelayWaterfallWidget(QWidget):
+    """Horizontal stacked delay waterfall timeline for the selected timing path."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._path: Optional[TimingPath] = None
+        self.setFixedHeight(28)
+
+    def set_path(self, path: Optional[TimingPath]) -> None:
+        self._path = path
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        try:
+            w = self.width()
+            h = self.height()
+            painter.fillRect(0, 0, w, h, QColor("#181B22"))
+            painter.setPen(QPen(QColor("#2B2E38"), 1))
+            painter.drawRect(0, 0, w - 1, h - 1)
+
+            if self._path is None:
+                painter.setPen(QColor("#707888"))
+                painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+                painter.drawText(self.rect(), Qt.AlignCenter, "Select a path in table to inspect Gate vs. Wire Delay Waterfall")
+                return
+
+            p = self._path
+            total_delay = max(p.arrival_time, 0.05)
+            est_cell_delay = min(p.logic_level * 0.045, total_delay * 0.75) if p.logic_level > 0 else total_delay * 0.4
+            est_wire_delay = max(total_delay - est_cell_delay, 0.01)
+            cell_pct = int((est_cell_delay / total_delay) * 100)
+            wire_pct = 100 - cell_pct
+
+            pad_x = 6
+            pad_y = 5
+            bar_w = w - 2 * pad_x
+            bar_h = h - 2 * pad_y
+
+            cell_w = (cell_pct / 100.0) * bar_w
+            wire_w = bar_w - cell_w
+
+            # Cell delay segment (Purple)
+            painter.fillRect(QRectF(pad_x, pad_y, cell_w, bar_h), QColor("#7C4DFF"))
+            # Wire delay segment (Orange)
+            painter.fillRect(QRectF(pad_x + cell_w, pad_y, wire_w, bar_h), QColor("#FF9100"))
+
+            painter.setPen(QPen(QColor("#1A1D24"), 1))
+            painter.drawRect(QRectF(pad_x, pad_y, bar_w, bar_h))
+
+            painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+            painter.setPen(QColor("#FFFFFF"))
+            if cell_w > 90:
+                painter.drawText(QRectF(pad_x + 6, pad_y, cell_w - 12, bar_h), Qt.AlignLeft | Qt.AlignVCenter, f"Gate Delay: {cell_pct}% ({est_cell_delay:.2f}ns)")
+            if wire_w > 90:
+                painter.drawText(QRectF(pad_x + cell_w + 6, pad_y, wire_w - 12, bar_h), Qt.AlignLeft | Qt.AlignVCenter, f"Wire Delay: {wire_pct}% ({est_wire_delay:.2f}ns)")
+
+        finally:
+            painter.end()
 
 
 # ==============================================================================
@@ -1120,6 +1693,8 @@ class TimingReportWidget(QWidget):
     def setLayoutViewer(self, viewer: Any) -> None:
         """Stores reference to LayoutViewer to reuse pre-indexed alias maps."""
         self._layout_viewer = viewer
+        if self._report_data is not None and hasattr(viewer, "setTimingReportData"):
+            viewer.setTimingReportData(self._report_data)
 
     def _setup_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -1138,30 +1713,61 @@ class TimingReportWidget(QWidget):
         upper_splitter.setChildrenCollapsible(False)
         upper_splitter.setStyleSheet("QSplitter::handle { background-color: #282C37; width: 3px; }")
 
-        # Upper Left: Path Histogram Card
-        hist_box = QFrame()
-        hist_box.setStyleSheet("background-color: #1A1D24; border: 1px solid #282C37; border-radius: 4px;")
-        hist_layout = QVBoxLayout(hist_box)
-        hist_layout.setContentsMargins(4, 4, 4, 4)
-        hist_layout.setSpacing(2)
+        # Upper Left: Multi-View Timing Visualizer Deck
+        viz_box = QFrame()
+        viz_box.setStyleSheet("background-color: #1A1D24; border: 1px solid #282C37; border-radius: 4px;")
+        viz_layout = QVBoxLayout(viz_box)
+        viz_layout.setContentsMargins(4, 4, 4, 4)
+        viz_layout.setSpacing(2)
 
-        hist_header = QHBoxLayout()
-        hist_title = QLabel("Path Histogram")
-        hist_title.setStyleSheet("color: #E2E8F0; font-weight: bold; font-size: 8pt;")
-        hist_header.addWidget(hist_title)
-        hist_header.addStretch()
+        viz_header = QHBoxLayout()
+        viz_header.setSpacing(3)
+
+        self._btn_view_hist = QPushButton("Histogram")
+        self._btn_view_scatter = QPushButton("Slack vs Logic")
+        self._btn_view_pareto = QPushButton("Top Endpoints")
+        self._btn_view_cdc = QPushButton("Clock Matrix")
+
+        self._btn_view_hist.clicked.connect(lambda: self._set_viz_mode(0))
+        self._btn_view_scatter.clicked.connect(lambda: self._set_viz_mode(1))
+        self._btn_view_pareto.clicked.connect(lambda: self._set_viz_mode(2))
+        self._btn_view_cdc.clicked.connect(lambda: self._set_viz_mode(3))
+
+        for btn in (self._btn_view_hist, self._btn_view_scatter, self._btn_view_pareto, self._btn_view_cdc):
+            btn.setFixedHeight(18)
+            viz_header.addWidget(btn)
+
+        viz_header.addStretch()
 
         self._btn_reset_hist = QPushButton("Reset Filter")
         self._btn_reset_hist.setFixedHeight(18)
         self._btn_reset_hist.setStyleSheet("font-size: 7pt; padding: 0 4px;")
         self._btn_reset_hist.clicked.connect(self._reset_histogram_filter)
-        hist_header.addWidget(self._btn_reset_hist)
-        hist_layout.addLayout(hist_header)
+        viz_header.addWidget(self._btn_reset_hist)
+        viz_layout.addLayout(viz_header)
+
+        # Multi-view deck
+        self._viz_deck = QStackedWidget()
 
         self._hist_widget = PathHistogramWidget()
         self._hist_widget.bin_selected.connect(self._on_histogram_bin_selected)
-        hist_layout.addWidget(self._hist_widget)
-        upper_splitter.addWidget(hist_box)
+        self._viz_deck.addWidget(self._hist_widget)
+
+        self._scatter_widget = SlackScatterPlotWidget()
+        self._scatter_widget.path_selected.connect(self._on_path_selected)
+        self._viz_deck.addWidget(self._scatter_widget)
+
+        self._pareto_widget = EndpointParetoWidget()
+        self._pareto_widget.endpoint_selected.connect(self._on_endpoint_filter)
+        self._viz_deck.addWidget(self._pareto_widget)
+
+        self._clock_matrix_widget = ClockMatrixWidget()
+        self._clock_matrix_widget.clock_pair_selected.connect(self._on_clock_pair_filter)
+        self._viz_deck.addWidget(self._clock_matrix_widget)
+
+        viz_layout.addWidget(self._viz_deck)
+        upper_splitter.addWidget(viz_box)
+        self._set_viz_mode(0)
 
         # Upper Right: Category Summary Card
         summary_box = QFrame()
@@ -1178,7 +1784,7 @@ class TimingReportWidget(QWidget):
         summary_layout.addWidget(self._summary_widget)
         upper_splitter.addWidget(summary_box)
 
-        upper_splitter.setSizes([450, 300])
+        upper_splitter.setSizes([460, 290])
         main_splitter.addWidget(upper_splitter)
 
         # Middle section: Tabbed Path Category & Optimization Failure Reason
@@ -1202,7 +1808,7 @@ class TimingReportWidget(QWidget):
 
         main_splitter.addWidget(middle_tabs)
 
-        # Lower section: Path List Table
+        # Lower section: Path List Table & Delay Waterfall Inspector
         lower_box = QFrame()
         lower_box.setStyleSheet("background-color: #1A1D24; border: 1px solid #282C37; border-radius: 4px;")
         lower_layout = QVBoxLayout(lower_box)
@@ -1234,6 +1840,10 @@ class TimingReportWidget(QWidget):
 
         lower_layout.addLayout(lower_header)
 
+        # Path Delay Waterfall Inspector Bar
+        self._waterfall_widget = PathDelayWaterfallWidget()
+        lower_layout.addWidget(self._waterfall_widget)
+
         self._path_list = PathListTable()
         self._path_list.path_selected.connect(self._on_path_selected)
         self._path_list.paths_highlighted.connect(self.paths_highlighted.emit)
@@ -1242,8 +1852,8 @@ class TimingReportWidget(QWidget):
 
         main_splitter.addWidget(lower_box)
 
-        # Initial splitter proportion (e.g. 200px histogram, 130px categories, 350px path list)
-        main_splitter.setSizes([180, 120, 320])
+        # Initial splitter proportion (e.g. 200px visualizers, 120px categories, 330px path list)
+        main_splitter.setSizes([190, 115, 335])
         main_layout.addWidget(main_splitter)
 
     def _create_top_toolbar(self) -> QWidget:
@@ -1371,8 +1981,15 @@ class TimingReportWidget(QWidget):
                 mbit_alias = self._layout_viewer._get_mbit_alias()
             self._report_data.compute_wire_lengths(self._chip, mbit_alias=mbit_alias)
 
-        # Update Histogram
+        # Update Visualizers
         self._hist_widget.set_bins(report.histogram_bins)
+        self._scatter_widget.set_paths(report.paths)
+        self._pareto_widget.set_paths(report.paths)
+        self._clock_matrix_widget.set_paths(report.paths)
+
+        # Notify LayoutViewer to build timing connectivity index
+        if self._layout_viewer and hasattr(self._layout_viewer, "setTimingReportData"):
+            self._layout_viewer.setTimingReportData(report)
 
         # Update Summary
         stats_all = report.categories.get("all")
@@ -1411,12 +2028,41 @@ class TimingReportWidget(QWidget):
         self._chip = chip
         if layout_viewer is not None:
             self._layout_viewer = layout_viewer
-        if self._report_data is not None and chip is not None:
+        if chip is None:
+            return
+        if self._report_data is not None:
             mbit_alias = None
             if self._layout_viewer and hasattr(self._layout_viewer, "_get_mbit_alias"):
                 mbit_alias = self._layout_viewer._get_mbit_alias()
             self._report_data.compute_wire_lengths(chip, mbit_alias=mbit_alias)
             self._apply_filters()
+
+    def clear(self) -> None:
+        """Clears all loaded timing report paths, statistics, visualizations, and input fields."""
+        self._report_data = None
+        self._chip = None
+        self._layout_viewer = None
+        self._file_edit.clear()
+        self._search_input.clear()
+        self._active_slack_range = None
+        self._active_category = None
+        self._active_reason = None
+        self._hist_widget.set_bins([])
+        self._scatter_widget.set_paths([])
+        self._pareto_widget.set_paths([])
+        self._clock_matrix_widget.set_paths([])
+        self._waterfall_widget.set_path(None)
+        self._summary_widget.set_stats(None)
+        self._category_table.set_categories({})
+        self._reason_table.set_reasons([])
+        self._path_list.set_paths([])
+        self._badge_paths.setText("0 Paths")
+        self._badge_wns.setText("WNS: 0.0000 ns")
+        self._badge_tns.setText("TNS: 0.0000 ns")
+        self._badge_paths.setVisible(False)
+        self._badge_wns.setVisible(False)
+        self._badge_tns.setVisible(False)
+        self.paths_cleared.emit()
 
     def _browse_file_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1488,7 +2134,24 @@ class TimingReportWidget(QWidget):
 
         self._path_list.set_paths(filtered)
 
+    def _set_viz_mode(self, mode: int) -> None:
+        self._viz_deck.setCurrentIndex(mode)
+        buttons = [self._btn_view_hist, self._btn_view_scatter, self._btn_view_pareto, self._btn_view_cdc]
+        for idx, btn in enumerate(buttons):
+            if idx == mode:
+                btn.setStyleSheet("background-color: #00E5FF; color: #000000; font-weight: bold; font-size: 7pt; border-radius: 2px; padding: 2px 6px;")
+            else:
+                btn.setStyleSheet("background-color: #232732; color: #A0A8B8; font-weight: bold; font-size: 7pt; border-radius: 2px; padding: 2px 6px;")
+
+    def _on_endpoint_filter(self, ep_name: str) -> None:
+        self._search_input.setText(ep_name)
+
+    def _on_clock_pair_filter(self, launch_clk: str, capture_clk: str) -> None:
+        self._search_input.setText(launch_clk)
+
     def _on_path_selected(self, path: TimingPath, zoom: bool) -> None:
+        self._waterfall_widget.set_path(path)
+        self._scatter_widget.set_selected_path(path)
         self.path_selected.emit(path, zoom)
 
 
@@ -1532,4 +2195,7 @@ class TimingReportDock(QDockWidget):
 
     def setChip(self, chip: Any, layout_viewer: Any = None) -> None:
         self._widget.setChip(chip, layout_viewer=layout_viewer)
+
+    def clear(self) -> None:
+        self._widget.clear()
 

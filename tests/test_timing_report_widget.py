@@ -162,6 +162,7 @@ def test_layout_viewer_timing_path_highlight(qapp):
 
     viewer.clearTimingPaths()
     assert viewer._active_timing_path is None
+    viewer.close()
 
 
 def test_clear_all_highlights_button_and_signal(qapp):
@@ -281,6 +282,7 @@ def test_layout_viewer_mbit_alias_resolution(qapp):
     # Center of [25000, 35000] to [27000, 38000] is (26000, 36500)
     assert pts[0].x == 26000
     assert pts[0].y == 36500
+    viewer.close()
 
 
 def test_layout_viewer_hud_badge_and_single_point_render(qapp):
@@ -310,6 +312,7 @@ def test_layout_viewer_hud_badge_and_single_point_render(qapp):
         viewer._draw_timing_paths(painter2)
     finally:
         painter2.end()
+    viewer.close()
 
 
 def test_manhattan_wirelength_computation(qapp):

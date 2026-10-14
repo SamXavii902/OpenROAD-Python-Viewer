@@ -1,4 +1,4 @@
-# Core GUI and EDA Data Processing Dependencies
-PySide6>=6.5.0
+# Use PySide6-Essentials (QtCore, QtGui, QtWidgets) to keep on-device storage minimal (~150MB instead of ~650MB)
+PySide6-Essentials>=6.5.0
 numpy>=1.24.0
 pytest>=7.0.0
