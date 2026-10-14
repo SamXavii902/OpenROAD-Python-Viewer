@@ -50,6 +50,7 @@ class dbInst:
         for mterm in master.getMTerms():
             self._iterms.append(dbITerm(self, mterm))
         self._halo: Rect = Rect(0, 0, 0, 0)
+        self._cached_bbox: Optional[dbBox] = None
 
     def getBlock(self) -> "dbBlock":
         return self._block
@@ -65,12 +66,14 @@ class dbInst:
 
     def setOrigin(self, x: int, y: int) -> None:
         self._origin = Point(x, y)
+        self._cached_bbox = None
 
     def getOrient(self) -> dbOrientType:
         return self._orient
 
     def setOrient(self, orient: dbOrientType) -> None:
         self._orient = orient
+        self._cached_bbox = None
 
     def getPlacementStatus(self) -> dbPlacementStatus:
         return self._status
@@ -82,6 +85,9 @@ class dbInst:
         return self._status not in (dbPlacementStatus.NONE, dbPlacementStatus.UNPLACED)
 
     def getLocation(self) -> Point:
+        if self._cached_bbox is not None:
+            box = self._cached_bbox.getBox()
+            return Point(box.xMin(), box.yMin())
         bbox = self.getBBox().getBox()
         return Point(bbox.xMin(), bbox.yMin())
 
@@ -95,17 +101,23 @@ class dbInst:
             t = dbTransform(self._orient)
             transformed = t.apply(bbox)
             self.setOrigin(x - transformed.xMin(), y - transformed.yMin())
+            self._cached_bbox = dbBox(None, Rect(x, y, x + transformed.dx(), y + transformed.dy()))
         else:
             self.setOrigin(x, y)
+            self._cached_bbox = None
 
     def getTransform(self) -> dbTransform:
         return dbTransform(self._orient, self._origin)
 
     def getBBox(self) -> dbBox:
+        if self._cached_bbox is not None:
+            return self._cached_bbox
         xfm = self.getTransform()
         master_box = self._master.getPlacementBoundary()
         placed_rect = xfm.apply(master_box)
-        return dbBox(None, placed_rect)
+        bbox = dbBox(None, placed_rect)
+        self._cached_bbox = bbox
+        return bbox
 
     def getITerms(self) -> List[dbITerm]:
         return self._iterms

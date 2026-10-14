@@ -388,7 +388,16 @@ class MainWindow(QMainWindow):
             if progress.wasCanceled():
                 return
 
+            last_def_ui_update = 0.0
+
             def on_def_progress(stage: str, cur: int, total: int, detail: str = "", sub_fraction: float = 0.0) -> None:
+                nonlocal last_def_ui_update
+                now = time.time()
+                is_final = cur >= total and total > 0
+                if not is_final and now - last_def_ui_update < 0.12:
+                    return
+                last_def_ui_update = now
+
                 if stage == "Components":
                     ratio = min(max(cur / max(total, 1), 0.0), 1.0)
                     mapped_pct = 15 + int(ratio * 28)  # 15% to 43%
@@ -574,7 +583,16 @@ class MainWindow(QMainWindow):
         progress.setValue(0)
         QApplication.processEvents()
 
+        last_def_ui_update = 0.0
+
         def on_def_progress(stage: str, cur: int, total: int, detail: str = "", sub_fraction: float = 0.0) -> None:
+            nonlocal last_def_ui_update
+            now = time.time()
+            is_final = cur >= total and total > 0
+            if not is_final and now - last_def_ui_update < 0.12:
+                return
+            last_def_ui_update = now
+
             if stage == "Components":
                 ratio = min(max(cur / max(total, 1), 0.0), 1.0)
                 mapped_pct = int(ratio * 35)  # 0% to 35%

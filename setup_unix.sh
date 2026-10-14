@@ -78,10 +78,6 @@ echo "======================================================"
 echo " Setup complete! Ready to run."
 echo "======================================================"
 
-# If arguments were provided, execute run_gui.py with them; otherwise launch interactive viewer
-if [ $# -gt 0 ]; then
-    python run_gui.py "$@"
-else
-    python run_gui.py
-fi
+# Launch via run.sh (with auto-bsub cluster submission and multi-core performance tuning)
+exec "$SCRIPT_DIR/run.sh" "$@"
 

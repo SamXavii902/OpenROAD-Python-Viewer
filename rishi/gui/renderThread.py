@@ -315,15 +315,7 @@ class RenderThread(QThread):
 
     @staticmethod
     def isMacro(inst: dbInst) -> bool:
-        master = inst.getMaster()
-        if master.isBlock() or master.isPad():
-            return True
-        mw = master.getWidth()
-        mh = master.getHeight()
-        if mw > 15000 or mh > 15000:
-            return True
-        name_l = master.getName().lower()
-        return any(k in name_l for k in ("ram", "sram", "rom", "fakeram", "pll", "fifo", "mem"))
+        return inst.getMaster().isMacro()
 
     # Ported from: gui/src/renderThread.cpp:510 drawInstanceOutlines
     def drawInstanceOutlines(self, painter: QPainter, insts: List[dbInst]) -> None:
@@ -344,13 +336,14 @@ class RenderThread(QThread):
         macro_pen.setCosmetic(True)
         macro_brush = QBrush(options.macroColor())
 
+        # Track active pen to avoid redundant C++ state switches
+        last_mode = None  # "macro" or "cell"
+
         for idx, inst in enumerate(insts):
-            if idx % 500 == 0 and self._restart:
+            if idx % 1000 == 0 and self._restart:
                 break
             master = inst.getMaster()
-            mw = master.getWidth()
-            mh = master.getHeight()
-            is_macro = self.isMacro(inst)
+            is_macro = master.isMacro()
 
             if is_macro:
                 if not show_macros:
@@ -360,10 +353,13 @@ class RenderThread(QThread):
                 painter.setTransform(xfm)
                 painter.setPen(macro_pen)
                 painter.setBrush(macro_brush)
+                last_mode = "macro"
                 mbox = master.getPlacementBoundary()
                 painter.drawRect(mbox.xMin(), mbox.yMin(), mbox.dx(), mbox.dy())
 
                 # Corner orientation tag
+                mw = master.getWidth()
+                mh = master.getHeight()
                 tag_w = min(0.25 * mw, 0.125 * mh)
                 tag_x = mbox.xMin() + tag_w
                 tag_y = mbox.yMin() + tag_w * 2
@@ -371,20 +367,27 @@ class RenderThread(QThread):
             else:
                 if not show_std_cells:
                     continue
-                xfm = QTransform(initial_xfm)
-                self.addInstTransform(xfm, inst.getTransform())
-                painter.setTransform(xfm)
-                painter.setPen(cell_pen)
-                painter.setBrush(Qt.NoBrush)
+                if last_mode != "cell":
+                    painter.setTransform(initial_xfm)
+                    painter.setPen(cell_pen)
+                    painter.setBrush(Qt.NoBrush)
+                    last_mode = "cell"
 
-                mbox = master.getPlacementBoundary()
-                painter.drawRect(mbox.xMin(), mbox.yMin(), mbox.dx(), mbox.dy())
+                bbox = inst.getBBox().getBox()
+                painter.drawRect(bbox.xMin(), bbox.yMin(), bbox.dx(), bbox.dy())
 
+                mh = master.getHeight()
                 if mh >= min_tag_height:
+                    xfm = QTransform(initial_xfm)
+                    self.addInstTransform(xfm, inst.getTransform())
+                    painter.setTransform(xfm)
+                    mbox = master.getPlacementBoundary()
+                    mw = master.getWidth()
                     tag_w = min(0.25 * mw, 0.125 * mh)
                     tag_x = mbox.xMin() + tag_w
                     tag_y = mbox.yMin() + tag_w * 2
                     painter.drawLine(QPointF(tag_x, mbox.yMin()), QPointF(mbox.xMin(), tag_y))
+                    painter.setTransform(initial_xfm)
 
         painter.setTransform(initial_xfm)
 

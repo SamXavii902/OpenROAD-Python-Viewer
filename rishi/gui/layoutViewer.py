@@ -903,7 +903,11 @@ class LayoutViewer(QWidget):
     def fullRepaint(self) -> None:
         rect = self.rect()
         if not rect.isEmpty():
-            self._render_thread.render(rect)
+            # Pad rendering bounds by 25% into RAM so panning has immediate visual coverage
+            pad_w = int(rect.width() * 0.25)
+            pad_h = int(rect.height() * 0.25)
+            padded_rect = rect.adjusted(-pad_w, -pad_h, pad_w, pad_h)
+            self._render_thread.render(padded_rect)
 
     def _on_render_done(
         self,

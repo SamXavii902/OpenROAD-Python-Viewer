@@ -43,6 +43,7 @@ class DefParser:
             db.setTech(self._tech)
         self._block: Optional[dbBlock] = None
         self._dbu: int = self._tech.getDbuPerMicron()
+        self._master_cache: Dict[str, dbMaster] = {}
 
     def dbu(self, val: float) -> int:
         return round(float(val))
@@ -315,14 +316,19 @@ class DefParser:
                 self._block.addVia(via)
 
     def _find_master(self, name: str) -> dbMaster:
+        m = self._master_cache.get(name)
+        if m is not None:
+            return m
         for lib in self._db.getLibs():
             m = lib.findMaster(name)
             if m:
+                self._master_cache[name] = m
                 return m
         # Create dummy master if not found
         dummy = dbMaster(name)
         dummy.setWidth(1000)
         dummy.setHeight(1000)
+        self._master_cache[name] = dummy
         return dummy
 
     def _parse_components(self, reader: TokenReader) -> None:
@@ -334,6 +340,7 @@ class DefParser:
         self._notify_progress("Components", 0, total_count)
 
         comp_idx = 0
+        update_interval = 25000 if total_count > 100000 else 2000
         while reader.has_next():
             tok = reader.next()
             if tok.upper() == "END":
@@ -344,7 +351,7 @@ class DefParser:
                 break
             if tok == "-":
                 comp_idx += 1
-                if comp_idx % 2000 == 0:
+                if comp_idx % update_interval == 0:
                     self._notify_progress("Components", comp_idx, total_count)
                 inst_name = reader.next()
                 master_name = reader.next()

@@ -146,6 +146,8 @@ class dbMaster:
         self._mterms_by_name: Dict[str, dbMTerm] = {}
         self._obstructions: List[dbBox] = []
         self._poly_obstructions: List[tuple[dbTechLayer, Polygon]] = []
+        self._cached_boundary: Optional[Rect] = None
+        self._is_macro_cached: Optional[bool] = None
 
     def getName(self) -> str:
         return self._name
@@ -155,6 +157,7 @@ class dbMaster:
 
     def setType(self, t: dbMasterType) -> None:
         self._type = t
+        self._is_macro_cached = None
 
     def getWidth(self) -> int:
         return self._width
@@ -164,17 +167,24 @@ class dbMaster:
 
     def setWidth(self, w: int) -> None:
         self._width = w
+        self._cached_boundary = None
+        self._is_macro_cached = None
 
     def setHeight(self, h: int) -> None:
         self._height = h
+        self._cached_boundary = None
+        self._is_macro_cached = None
 
     def getOrigin(self) -> Point:
         return self._origin
 
     def setOrigin(self, pt: Point) -> None:
         self._origin = Point(pt.x, pt.y)
+        self._cached_boundary = None
 
     def getPlacementBoundary(self, box: Optional[Rect] = None) -> Rect:
+        if self._cached_boundary is not None and box is None:
+            return self._cached_boundary
         res = Rect(
             -self._origin.x,
             -self._origin.y,
@@ -186,10 +196,26 @@ class dbMaster:
             box.set_ylo(res.yMin())
             box.set_xhi(res.xMax())
             box.set_yhi(res.yMax())
+        else:
+            self._cached_boundary = res
         return res
 
     def getBBox(self) -> Rect:
         return self.getPlacementBoundary()
+
+    def isMacro(self) -> bool:
+        if self._is_macro_cached is not None:
+            return self._is_macro_cached
+        if self.isBlock() or self.isPad():
+            self._is_macro_cached = True
+            return True
+        if self._width > 15000 or self._height > 15000:
+            self._is_macro_cached = True
+            return True
+        name_l = self._name.lower()
+        res = any(k in name_l for k in ("ram", "sram", "rom", "fakeram", "pll", "fifo", "mem"))
+        self._is_macro_cached = res
+        return res
 
     def isCore(self) -> bool:
         return self._type in (

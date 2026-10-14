@@ -1,5 +1,7 @@
 """Spatial index implementation ported from RISHI gui/src/search.cpp."""
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple, Dict, Optional, Callable
 import numpy as np
 from rishi.odb.geom import Rect
@@ -59,7 +61,7 @@ class SpatialSearch:
         self._row_boxes = None
 
     def build(self, block: dbBlock, callback: Optional[Callable[[str, int, int], None]] = None) -> None:
-        """Indexes all block objects for fast viewport querying."""
+        """Indexes all block objects for fast viewport querying utilizing all available CPU cores."""
         self._block = block
         self._insts = list(block.getInsts())
         n_insts = len(self._insts)
@@ -69,25 +71,35 @@ class SpatialSearch:
 
         # Index instances
         if self._insts:
-            boxes = []
-            is_macro_list = []
-            for idx, inst in enumerate(self._insts):
-                if callback and idx > 0 and idx % 20000 == 0:
-                    callback("Instances", idx, n_insts)
-                bbox = inst.getBBox().getBox()
-                boxes.append([bbox.xMin(), bbox.yMin(), bbox.xMax(), bbox.yMax()])
-                master = inst.getMaster()
-                name_l = master.getName().lower()
-                is_m = (
-                    master.isBlock()
-                    or master.isPad()
-                    or master.getWidth() > 15000
-                    or master.getHeight() > 15000
-                    or any(k in name_l for k in ("ram", "sram", "rom", "fakeram", "pll", "fifo", "mem"))
-                )
-                is_macro_list.append(is_m)
-            self._inst_boxes = np.array(boxes, dtype=np.int32)
-            self._inst_is_macro = np.array(is_macro_list, dtype=bool)
+            boxes = np.empty((n_insts, 4), dtype=np.int32)
+            is_macro_list = np.empty(n_insts, dtype=bool)
+
+            num_workers = min(16, max(1, os.cpu_count() or 1))
+            chunk_size = max(25000, (n_insts + num_workers - 1) // num_workers)
+
+            def _process_inst_chunk(start_idx: int, end_idx: int):
+                for i in range(start_idx, end_idx):
+                    inst = self._insts[i]
+                    b = inst.getBBox().getBox()
+                    boxes[i, 0] = b.xMin()
+                    boxes[i, 1] = b.yMin()
+                    boxes[i, 2] = b.xMax()
+                    boxes[i, 3] = b.yMax()
+                    is_macro_list[i] = inst.getMaster().isMacro()
+
+            if n_insts > 30000 and num_workers > 1:
+                with ThreadPoolExecutor(max_workers=num_workers) as pool:
+                    futures = []
+                    for c_start in range(0, n_insts, chunk_size):
+                        c_end = min(c_start + chunk_size, n_insts)
+                        futures.append(pool.submit(_process_inst_chunk, c_start, c_end))
+                    for f in futures:
+                        f.result()
+            else:
+                _process_inst_chunk(0, n_insts)
+
+            self._inst_boxes = boxes
+            self._inst_is_macro = is_macro_list
             self._inst_sizes = np.maximum(
                 self._inst_boxes[:, 2] - self._inst_boxes[:, 0],
                 self._inst_boxes[:, 3] - self._inst_boxes[:, 1],
@@ -129,8 +141,15 @@ class SpatialSearch:
             if callback:
                 callback(f"Layer {lname} ({len(shapes):,} shapes)", l_idx, max(n_layers, 1))
             self._route_shapes_by_layer[lname] = shapes
-            boxes = [[s.box.xMin(), s.box.yMin(), s.box.xMax(), s.box.yMax(), 1 if s.is_via else 0] for s in shapes]
-            arr = np.array(boxes, dtype=np.int32)
+            n_shapes = len(shapes)
+            arr = np.empty((n_shapes, 5), dtype=np.int32)
+            for s_i, s in enumerate(shapes):
+                b = s.box
+                arr[s_i, 0] = b.xMin()
+                arr[s_i, 1] = b.yMin()
+                arr[s_i, 2] = b.xMax()
+                arr[s_i, 3] = b.yMax()
+                arr[s_i, 4] = 1 if s.is_via else 0
             self._route_boxes_by_layer[lname] = arr
             self._route_sizes_by_layer[lname] = np.maximum(arr[:, 2] - arr[:, 0], arr[:, 3] - arr[:, 1])
 
@@ -147,25 +166,43 @@ class SpatialSearch:
 
         for lname, obs_list in layer_obs.items():
             self._obs_by_layer[lname] = obs_list
-            boxes = [[o.getBox().xMin(), o.getBox().yMin(), o.getBox().xMax(), o.getBox().yMax()] for o in obs_list]
-            self._obs_boxes_by_layer[lname] = np.array(boxes, dtype=np.int32)
+            n_obs = len(obs_list)
+            arr = np.empty((n_obs, 4), dtype=np.int32)
+            for o_i, o in enumerate(obs_list):
+                b = o.getBox()
+                arr[o_i, 0] = b.xMin()
+                arr[o_i, 1] = b.yMin()
+                arr[o_i, 2] = b.xMax()
+                arr[o_i, 3] = b.yMax()
+            self._obs_boxes_by_layer[lname] = arr
 
         # Index blockages
         self._blockages = list(block.getBlockages())
         if self._blockages:
-            boxes = [[b.getBox().xMin(), b.getBox().yMin(), b.getBox().xMax(), b.getBox().yMax()] for b in self._blockages]
-            self._blockage_boxes = np.array(boxes, dtype=np.int32)
+            n_blk = len(self._blockages)
+            arr = np.empty((n_blk, 4), dtype=np.int32)
+            for b_i, b in enumerate(self._blockages):
+                box = b.getBox()
+                arr[b_i, 0] = box.xMin()
+                arr[b_i, 1] = box.yMin()
+                arr[b_i, 2] = box.xMax()
+                arr[b_i, 3] = box.yMax()
+            self._blockage_boxes = arr
         else:
             self._blockage_boxes = np.empty((0, 4), dtype=np.int32)
 
         # Index rows
         self._rows = list(block.getRows())
         if self._rows:
-            boxes = []
-            for r in self._rows:
+            n_rows = len(self._rows)
+            arr = np.empty((n_rows, 4), dtype=np.int32)
+            for r_i, r in enumerate(self._rows):
                 rb = r.getBBox()
-                boxes.append([rb.xMin(), rb.yMin(), rb.xMax(), rb.yMax()])
-            self._row_boxes = np.array(boxes, dtype=np.int32)
+                arr[r_i, 0] = rb.xMin()
+                arr[r_i, 1] = rb.yMin()
+                arr[r_i, 2] = rb.xMax()
+                arr[r_i, 3] = rb.yMax()
+            self._row_boxes = arr
         else:
             self._row_boxes = np.empty((0, 4), dtype=np.int32)
 
