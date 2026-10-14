@@ -121,6 +121,28 @@ def apply_dark_theme(app: QApplication) -> None:
             font-weight: bold;
             font-size: 8pt;
         }
+        QPushButton {
+            background-color: #262B38;
+            color: #E2E8F0;
+            border: 1px solid #3B4356;
+            border-radius: 3px;
+            padding: 3px 8px;
+            font-size: 8pt;
+            font-weight: bold;
+        }
+        QPushButton:hover {
+            background-color: #333B4D;
+            color: #00E5FF;
+            border: 1px solid #00E5FF;
+        }
+        QPushButton:pressed {
+            background-color: #1A1E27;
+        }
+        QPushButton:disabled {
+            background-color: #1A1D24;
+            color: #64748B;
+            border: 1px solid #282C37;
+        }
         QScrollBar:vertical {
             background: #141720;
             width: 10px;
@@ -155,3 +177,4 @@ def apply_dark_theme(app: QApplication) -> None:
         }
     """
     app.setStyleSheet(stylesheet)
+

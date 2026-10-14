@@ -2021,8 +2021,19 @@ class TimingReportWidget(QWidget):
         viz_header.addStretch()
 
         self._btn_reset_hist = QPushButton("Reset Filter")
-        self._btn_reset_hist.setFixedHeight(18)
-        self._btn_reset_hist.setStyleSheet("font-size: 7pt; padding: 0 4px;")
+        self._btn_reset_hist.setFixedHeight(20)
+        self._btn_reset_hist.setStyleSheet("""
+            QPushButton {
+                background-color: #2D3446; color: #E2E8F0; border: 1px solid #475569;
+                border-radius: 3px; font-size: 7.5pt; font-weight: bold; padding: 1px 8px;
+            }
+            QPushButton:hover {
+                background-color: #384259; color: #00E5FF; border: 1px solid #00E5FF;
+            }
+            QPushButton:pressed {
+                background-color: #1F2432;
+            }
+        """)
         self._btn_reset_hist.clicked.connect(self._reset_histogram_filter)
         viz_header.addWidget(self._btn_reset_hist)
         viz_layout.addLayout(viz_header)
@@ -2115,7 +2126,18 @@ class TimingReportWidget(QWidget):
 
         btn_reset_all = QPushButton("Reset All Filters")
         btn_reset_all.setFixedHeight(22)
-        btn_reset_all.setStyleSheet("font-size: 8pt; padding: 0 6px;")
+        btn_reset_all.setStyleSheet("""
+            QPushButton {
+                background-color: #2D3446; color: #E2E8F0; border: 1px solid #475569;
+                border-radius: 3px; font-size: 8pt; font-weight: bold; padding: 1px 8px;
+            }
+            QPushButton:hover {
+                background-color: #384259; color: #00E5FF; border: 1px solid #00E5FF;
+            }
+            QPushButton:pressed {
+                background-color: #1F2432;
+            }
+        """)
         btn_reset_all.clicked.connect(self.reset_all_filters)
         lower_header.addWidget(btn_reset_all)
 
@@ -2162,12 +2184,36 @@ class TimingReportWidget(QWidget):
 
         btn_browse = QPushButton("...")
         btn_browse.setFixedSize(28, 24)
+        btn_browse.setStyleSheet("""
+            QPushButton {
+                background-color: #262B37; color: #E2E8F0; border: 1px solid #3B4254;
+                border-radius: 3px; font-size: 8pt; font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #323A4B; color: #00E5FF; border: 1px solid #00E5FF;
+            }
+            QPushButton:pressed {
+                background-color: #1D212B;
+            }
+        """)
         btn_browse.setToolTip("Browse for timing report file")
         btn_browse.clicked.connect(self._browse_file_dialog)
         t_layout.addWidget(btn_browse)
 
         btn_reload = QPushButton("Reload")
         btn_reload.setFixedHeight(24)
+        btn_reload.setStyleSheet("""
+            QPushButton {
+                background-color: #262B37; color: #E2E8F0; border: 1px solid #3B4254;
+                border-radius: 3px; font-size: 8pt; font-weight: bold; padding: 2px 8px;
+            }
+            QPushButton:hover {
+                background-color: #323A4B; color: #00E5FF; border: 1px solid #00E5FF;
+            }
+            QPushButton:pressed {
+                background-color: #1D212B;
+            }
+        """)
         btn_reload.setToolTip("Reload timing report file")
         btn_reload.clicked.connect(self._on_reload_clicked)
         t_layout.addWidget(btn_reload)
