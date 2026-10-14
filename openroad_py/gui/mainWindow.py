@@ -3,7 +3,7 @@
 import sys
 import os
 import glob
-from typing import Optional, List, Callable
+from typing import Optional, List, Callable, Any
 from PySide6.QtWidgets import (
     QMainWindow,
     QFileDialog,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtCore import Qt
+import time
 from openroad_py.odb.database import dbDatabase
 from openroad_py.odb.geom import Rect
 from openroad_py.lefin import LefParser
@@ -26,6 +27,8 @@ from openroad_py.gui.displayControls import DisplayControls
 from openroad_py.gui.legend import LegendDock
 from openroad_py.gui.inspector import InspectorDock
 from openroad_py.gui.searchWidget import SearchDock
+from openroad_py.gui.timingReportWidget import TimingReportDock
+from openroad_py.timing.tarpt_parser import TarptParser
 
 
 class MainWindow(QMainWindow):
@@ -78,6 +81,11 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(self._inspector, self._legend)
         self._inspector.raise_()
 
+        # Bottom dock: Timing Report & Debugger (Cadence Innovus / Tempus UI)
+        self._timing_dock = TimingReportDock(self)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self._timing_dock)
+        self._timing_dock.hide()
+
         self._controls.option_toggled.connect(self._on_display_control_option_toggled)
         self._inspector.macro_selected.connect(self._on_macro_selected)
         self._search_dock.object_selected.connect(self._on_search_object_selected)
@@ -85,6 +93,10 @@ class MainWindow(QMainWindow):
         self._viewer.instance_selected.connect(self._on_instance_selected)
         self._viewer.ruler_measured.connect(self._on_ruler_measured)
         self._viewer.ruler_mode_changed.connect(self._on_ruler_mode_changed)
+
+        self._timing_dock.path_selected.connect(self._on_timing_path_selected)
+        self._timing_dock.paths_highlighted.connect(self._on_timing_paths_highlighted)
+        self._timing_dock.paths_cleared.connect(self._viewer.clearTimingPaths)
 
         # Status Bar
         self._status_bar = QStatusBar(self)
@@ -124,6 +136,12 @@ class MainWindow(QMainWindow):
         open_def_act.setShortcut(QKeySequence("Ctrl+O"))
         open_def_act.triggered.connect(self._open_def_dialog)
         file_menu.addAction(open_def_act)
+
+        open_timing_act = QAction("Open &Timing Report...", self)
+        open_timing_act.setShortcut(QKeySequence("Ctrl+Shift+T"))
+        open_timing_act.setStatusTip("Open Cadence Innovus / Tempus timing report (.tarpt, .btarpt, .rpt)")
+        open_timing_act.triggered.connect(self._open_timing_report_dialog)
+        file_menu.addAction(open_timing_act)
 
         export_img_act = QAction("&Export Layout Image...", self)
         export_img_act.setShortcut(QKeySequence("Ctrl+Shift+S"))
@@ -187,6 +205,7 @@ class MainWindow(QMainWindow):
         docks_menu.addAction(self._search_dock.toggleViewAction())
         docks_menu.addAction(self._inspector.toggleViewAction())
         docks_menu.addAction(self._legend.toggleViewAction())
+        docks_menu.addAction(self._timing_dock.toggleViewAction())
         docks_menu.addSeparator()
 
         reset_layout_act = QAction("&Reset Dock Layout", self)
@@ -217,6 +236,12 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(clear_rulers_act)
 
         tools_menu.addSeparator()
+
+        timing_debugger_act = QAction("&Timing Report Debugger...", self)
+        timing_debugger_act.setShortcut(QKeySequence("Ctrl+T"))
+        timing_debugger_act.setStatusTip("Toggle Cadence timing report debugger dock (Ctrl+T)")
+        timing_debugger_act.triggered.connect(self._toggle_timing_debugger)
+        tools_menu.addAction(timing_debugger_act)
 
         find_act = QAction("&Find Object...", self)
         find_act.setShortcut(QKeySequence("Ctrl+F"))
@@ -424,11 +449,48 @@ class MainWindow(QMainWindow):
             progress.setValue(95)
             QApplication.processEvents()
 
-            # 95% - 99%: Search index
+            # 95% - 99%: Search index & Timing Dock
             progress.setLabelText("Indexing searchable components & nets...")
             QApplication.processEvents()
             self._search_dock.setChip(chip)
-            progress.setValue(99)
+            self._timing_dock.setChip(chip)
+            progress.setValue(97)
+            QApplication.processEvents()
+
+            # Auto-detect timing report in folder if present
+            folder_path = os.path.dirname(os.path.abspath(def_path))
+            tarpt_files = (
+                glob.glob(os.path.join(folder_path, "*.tarpt"))
+                + glob.glob(os.path.join(folder_path, "*.btarpt"))
+                + glob.glob(os.path.join(folder_path, "**", "*.tarpt"), recursive=True)
+                + glob.glob(os.path.join(folder_path, "**", "*.btarpt"), recursive=True)
+            )
+            if tarpt_files:
+                tarpt_path = tarpt_files[0]
+                tarpt_base = os.path.basename(tarpt_path)
+                t_tarpt_start = time.time()
+
+                def on_tarpt_progress(stage: str, cur: int, total: int, detail: str) -> None:
+                    ratio = cur / max(total, 1) if total > 0 else 0.5
+                    t_pct = 97 + int(ratio * 2)  # 97% to 99%
+                    progress.setValue(min(t_pct, 99))
+                    now_el = time.time() - t_tarpt_start
+                    progress.setLabelText(f"Loading timing report: {tarpt_base}\n{detail} (Elapsed: {now_el:.2f}s)...")
+                    QApplication.processEvents()
+
+                try:
+                    rep = TarptParser().parse_file(tarpt_path, callback=on_tarpt_progress)
+                    self._timing_dock.get_widget()._file_edit.setText(tarpt_path)
+                    self._timing_dock.get_widget().set_report_data(rep)
+                    self._timing_dock.show()
+                    t_el = time.time() - t_tarpt_start
+                    self._status_bar.showMessage(
+                        f"Loaded timing report: {tarpt_base} ({len(rep.paths):,} paths) in {t_el:.2f}s", 5000
+                    )
+                except Exception as ex:
+                    print(f"Warning: failed to load timing report {tarpt_path}: {ex}")
+
+            progress.setValue(100)
             QApplication.processEvents()
 
             inst_count = len(block.getInsts())
@@ -581,7 +643,44 @@ class MainWindow(QMainWindow):
             progress.setLabelText("Indexing objects for fast search...")
             QApplication.processEvents()
             self._search_dock.setChip(chip)
-            progress.setValue(99)
+            self._timing_dock.setChip(chip)
+            progress.setValue(97)
+            QApplication.processEvents()
+
+            # Auto-detect timing report in folder if present
+            folder_path = os.path.dirname(os.path.abspath(filepath))
+            tarpt_files = (
+                glob.glob(os.path.join(folder_path, "*.tarpt"))
+                + glob.glob(os.path.join(folder_path, "*.btarpt"))
+                + glob.glob(os.path.join(folder_path, "**", "*.tarpt"), recursive=True)
+                + glob.glob(os.path.join(folder_path, "**", "*.btarpt"), recursive=True)
+            )
+            if tarpt_files:
+                tarpt_path = tarpt_files[0]
+                tarpt_base = os.path.basename(tarpt_path)
+                t_tarpt_start = time.time()
+
+                def on_def_tarpt_progress(stage: str, cur: int, total: int, detail: str) -> None:
+                    ratio = cur / max(total, 1) if total > 0 else 0.5
+                    t_pct = 97 + int(ratio * 2)
+                    progress.setValue(min(t_pct, 99))
+                    now_el = time.time() - t_tarpt_start
+                    progress.setLabelText(f"Loading timing report: {tarpt_base}\n{detail} (Elapsed: {now_el:.2f}s)...")
+                    QApplication.processEvents()
+
+                try:
+                    rep = TarptParser().parse_file(tarpt_path, callback=on_def_tarpt_progress)
+                    self._timing_dock.get_widget()._file_edit.setText(tarpt_path)
+                    self._timing_dock.get_widget().set_report_data(rep)
+                    self._timing_dock.show()
+                    t_el = time.time() - t_tarpt_start
+                    self._status_bar.showMessage(
+                        f"Loaded timing report: {tarpt_base} ({len(rep.paths):,} paths) in {t_el:.2f}s", 5000
+                    )
+                except Exception as ex:
+                    print(f"Warning: failed to load timing report {tarpt_path}: {ex}")
+
+            progress.setValue(100)
             QApplication.processEvents()
 
             net_count = len(block.getNets())
@@ -817,18 +916,50 @@ class MainWindow(QMainWindow):
         self._search_dock._search_input.setFocus()
         self._search_dock._search_input.selectAll()
 
+    def _toggle_timing_debugger(self) -> None:
+        """Toggles visibility of the Timing Report Debugger dock."""
+        if self._timing_dock.isVisible():
+            self._timing_dock.hide()
+        else:
+            self._timing_dock.show()
+            self._timing_dock.raise_()
+
+    def _open_timing_report_dialog(self) -> None:
+        """Opens file dialog to select and display a Cadence timing report."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Timing Report",
+            "",
+            "Timing Reports (*.tarpt *.btarpt *.rpt *.tarpt.gz);;All Files (*.*)",
+        )
+        if filepath:
+            self._timing_dock.show()
+            self._timing_dock.raise_()
+            self._timing_dock.load_file(filepath)
+            self._status_bar.showMessage(f"Loaded timing report: {os.path.basename(filepath)}", 4000)
+
+    def _on_timing_path_selected(self, path: Any, zoom: bool) -> None:
+        """Highlights selected timing path on chip layout canvas and optionally zooms."""
+        self._viewer.highlightTimingPath(path, zoom=zoom)
+
+    def _on_timing_paths_highlighted(self, paths: list) -> None:
+        """Highlights multiple timing paths simultaneously on chip layout canvas."""
+        self._viewer.highlightTimingPaths(paths)
+
     def _reset_dock_layout(self) -> None:
         """Restores the initial clean dock arrangement."""
         self.addDockWidget(Qt.LeftDockWidgetArea, self._controls)
         self.addDockWidget(Qt.RightDockWidgetArea, self._search_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self._inspector)
         self.addDockWidget(Qt.RightDockWidgetArea, self._legend)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self._timing_dock)
         self.tabifyDockWidget(self._search_dock, self._inspector)
         self.tabifyDockWidget(self._inspector, self._legend)
         self._controls.setFloating(False)
         self._search_dock.setFloating(False)
         self._inspector.setFloating(False)
         self._legend.setFloating(False)
+        self._timing_dock.setFloating(False)
         self._controls.show()
         self._search_dock.show()
         self._inspector.show()
@@ -845,6 +976,7 @@ class MainWindow(QMainWindow):
         self._search_dock.setFeatures(features)
         self._inspector.setFeatures(features)
         self._legend.setFeatures(features)
+        self._timing_dock.setFeatures(features)
         state_str = "locked" if locked else "unlocked (movable & floatable)"
         self._status_bar.showMessage(f"Docks {state_str}", 3000)
 

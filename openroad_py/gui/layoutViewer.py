@@ -1,7 +1,7 @@
 """LayoutViewer widget ported from OpenROAD gui/src/layoutViewer.cpp with interactive measurement ruler and object highlighting."""
 
 import math
-from typing import Optional, Dict, List, Tuple, Callable
+from typing import Optional, Dict, List, Tuple, Callable, Any
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, Signal, QRect, QRectF, QPoint, QSize, QPointF, QLineF, QTimer
 from PySide6.QtGui import (
@@ -88,6 +88,12 @@ class LayoutViewer(QWidget):
         self._density_core: Optional[Rect] = None
         self._density_max_val: float = 0.85
 
+        # Timing path debug overlay (Cadence Innovus/Tempus flightlines)
+        self._active_timing_path: Optional[Any] = None
+        self._timing_path_points: List[Point] = []
+        self._multi_path_points: List[List[Point]] = []
+        self._mbit_alias: Optional[Dict[str, Any]] = None
+
         # Background rendering thread (layoutViewer.cpp:125-259)
         self._render_thread = RenderThread(self)
         self._render_thread.done.connect(self._on_render_done)
@@ -115,6 +121,8 @@ class LayoutViewer(QWidget):
         self._highlight_items.clear()
         self._selected_inst = None
         self._flightlines.clear()
+        self._mbit_alias = None
+        self.clearTimingPaths()
         self._density_bins = None
         self._density_image = None
         self._density_core = None
@@ -294,6 +302,117 @@ class LayoutViewer(QWidget):
             self.highlightObjects([], zoom=False)
         else:
             self.highlightObjects([(rect, label)], zoom=zoom)
+
+    def highlightTimingPath(self, path: Optional[Any], zoom: bool = False) -> None:
+        """Highlights a specific timing path with yellow directional flightlines and arrowheads."""
+        if path is None:
+            self._active_timing_path = None
+            self._timing_path_points = []
+            self.update()
+            return
+
+        pts = self._resolve_timing_path_points(path)
+        self._active_timing_path = path
+        self._timing_path_points = pts
+
+        if pts and zoom:
+            xmin = min(p.x for p in pts)
+            ymin = min(p.y for p in pts)
+            xmax = max(p.x for p in pts)
+            ymax = max(p.y for p in pts)
+            dx = max(xmax - xmin, 5000)
+            dy = max(ymax - ymin, 5000)
+            rect = Rect(
+                xmin - int(dx * 0.15),
+                ymin - int(dy * 0.15),
+                xmax + int(dx * 0.15),
+                ymax + int(dy * 0.15),
+            )
+            self.zoomTo(rect)
+
+        self.update()
+
+    def highlightTimingPaths(self, paths: List[Any]) -> None:
+        """Highlights multiple timing paths simultaneously."""
+        multi_pts = []
+        for p in paths:
+            pts = self._resolve_timing_path_points(p)
+            if pts:
+                multi_pts.append(pts)
+        self._multi_path_points = multi_pts
+        self.update()
+
+    def clearTimingPaths(self) -> None:
+        """Clears all timing path overlays."""
+        self._active_timing_path = None
+        self._timing_path_points = []
+        self._multi_path_points = []
+        self.update()
+
+    def _get_mbit_alias(self) -> Dict[str, Any]:
+        """Builds on-demand mapping from logical registers to physical multi-bit CDN_MBIT_ instances."""
+        if getattr(self, "_mbit_alias", None) is not None:
+            return self._mbit_alias
+        self._mbit_alias = {}
+        if not self.hasDesign():
+            return self._mbit_alias
+        block = self._chip.getBlock()
+        for inst in block.getInsts():
+            name = inst.getName()
+            if "CDN_MBIT_" in name:
+                if "/" in name:
+                    parent, base = name.rsplit("/", 1)
+                    prefix = f"{parent}/"
+                else:
+                    prefix = ""
+                    base = name
+                if "CDN_MBIT_" in base:
+                    mbit_part = base.split("CDN_MBIT_", 1)[1]
+                    for sub in mbit_part.split("_MB_"):
+                        self._mbit_alias[f"{prefix}{sub}"] = inst
+        return self._mbit_alias
+
+    def _resolve_timing_path_points(self, path: Any) -> List[Point]:
+        """Resolves ordered physical DBU points along the timing path."""
+        if not self.hasDesign():
+            return []
+
+        block = self._chip.getBlock()
+        pts: List[Point] = []
+
+        def get_loc(pin_name: str) -> Optional[Point]:
+            if not pin_name:
+                return None
+            inst_name = pin_name.rsplit("/", 1)[0] if "/" in pin_name else pin_name
+            inst = block.findInst(inst_name)
+            if inst is None:
+                inst = self._get_mbit_alias().get(inst_name)
+            if inst and inst.isPlaced():
+                return inst.getBBox().getBox().center()
+            bterm = block.findBTerm(pin_name)
+            if bterm:
+                bbox = bterm.getBBox()
+                if bbox and (bbox.dx() > 0 or bbox.dy() > 0):
+                    return bbox.center()
+            return None
+
+        # Startpoint
+        p_start = get_loc(getattr(path, "startpoint", ""))
+        if p_start:
+            pts.append(p_start)
+
+        # Intermediate logic cells
+        for cell_master, pin_name in getattr(path, "cells", []):
+            pt = get_loc(pin_name)
+            if pt and (not pts or (pt.x != pts[-1].x or pt.y != pts[-1].y)):
+                pts.append(pt)
+
+        # Endpoint
+        p_end = get_loc(getattr(path, "endpoint", ""))
+        if p_end and (not pts or (p_end.x != pts[-1].x or p_end.y != pts[-1].y)):
+            pts.append(p_end)
+
+        return pts
 
     def selectInstance(self, inst: Optional[object]) -> None:
         """Selects an instance in viewport, highlights it, and updates flightlines."""
@@ -585,6 +704,9 @@ class LayoutViewer(QWidget):
             # Object Highlight overlay
             self._draw_highlight(painter)
 
+            # Timing path flightlines overlay (Cadence Innovus/Tempus directional arrows)
+            self._draw_timing_paths(painter)
+
             # Measurement Rulers overlay
             self._draw_rulers(painter)
 
@@ -609,6 +731,138 @@ class LayoutViewer(QWidget):
                 sp2 = self.dbuPointToScreen(p2)
                 qline_list.append(QLineF(sp1, sp2))
             painter.drawLines(qline_list)
+        finally:
+            painter.restore()
+
+    def _draw_timing_paths(self, painter: QPainter) -> None:
+        """Renders yellow directional timing path flightlines with arrows from startpoint to endpoint."""
+        if not self._timing_path_points and not self._multi_path_points:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        try:
+            # 1. Draw secondary highlighted paths
+            pen_secondary = QPen(QColor(255, 230, 0, 150), 1.5, Qt.DashLine)
+            pen_secondary.setCosmetic(True)
+            painter.setPen(pen_secondary)
+
+            for pts in self._multi_path_points:
+                if len(pts) < 2:
+                    continue
+                for i in range(len(pts) - 1):
+                    sp1 = self.dbuPointToScreen(pts[i])
+                    sp2 = self.dbuPointToScreen(pts[i + 1])
+                    painter.drawLine(sp1, sp2)
+
+            # 2. Draw active timing path
+            if len(self._timing_path_points) >= 2:
+                pts = self._timing_path_points
+                pen_active = QPen(QColor(255, 230, 0, 240), 2.5)
+                pen_active.setCosmetic(True)
+                painter.setPen(pen_active)
+
+                for i in range(len(pts) - 1):
+                    sp1 = self.dbuPointToScreen(pts[i])
+                    sp2 = self.dbuPointToScreen(pts[i + 1])
+                    painter.drawLine(sp1, sp2)
+
+                    # Directional arrow in the middle of each segment
+                    dx = sp2.x() - sp1.x()
+                    dy = sp2.y() - sp1.y()
+                    dist = math.hypot(dx, dy)
+                    if dist > 14:
+                        angle = math.atan2(dy, dx)
+                        mid_x = (sp1.x() + sp2.x()) / 2.0
+                        mid_y = (sp1.y() + sp2.y()) / 2.0
+                        arrow_len = 8.0
+                        arrow_angle = math.pi / 6.0
+
+                        p_arrow1 = QPointF(
+                            mid_x - arrow_len * math.cos(angle - arrow_angle),
+                            mid_y - arrow_len * math.sin(angle - arrow_angle),
+                        )
+                        p_arrow2 = QPointF(
+                            mid_x - arrow_len * math.cos(angle + arrow_angle),
+                            mid_y - arrow_len * math.sin(angle + arrow_angle),
+                        )
+                        arrow_poly = QPolygonF([QPointF(mid_x, mid_y), p_arrow1, p_arrow2])
+                        painter.setBrush(QColor(255, 230, 0, 240))
+                        painter.drawPolygon(arrow_poly)
+
+                # Intermediate gate markers
+                painter.setBrush(QColor(255, 230, 0, 220))
+                painter.setPen(QPen(QColor(20, 20, 20), 1))
+                for pt in pts[1:-1]:
+                    spt = self.dbuPointToScreen(pt)
+                    painter.drawEllipse(spt, 3.5, 3.5)
+
+                # Startpoint marker (Green badge)
+                sp_start = self.dbuPointToScreen(pts[0])
+                painter.setBrush(QColor(76, 175, 80))
+                painter.setPen(QPen(Qt.white, 1.5))
+                painter.drawEllipse(sp_start, 7, 7)
+                painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+                painter.setPen(Qt.white)
+                painter.drawText(QRectF(sp_start.x() - 7, sp_start.y() - 7, 14, 14), Qt.AlignCenter, "S")
+
+                # Endpoint marker (Red badge)
+                sp_end = self.dbuPointToScreen(pts[-1])
+                painter.setBrush(QColor(229, 57, 53))
+                painter.setPen(QPen(Qt.white, 1.5))
+                painter.drawEllipse(sp_end, 7, 7)
+                painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+                painter.setPen(Qt.white)
+                painter.drawText(QRectF(sp_end.x() - 7, sp_end.y() - 7, 14, 14), Qt.AlignCenter, "E")
+
+                # Floating Path HUD badge near startpoint
+                if self._active_timing_path:
+                    path = self._active_timing_path
+                    slack_col = "#FF5252" if getattr(path, "slack", 0.0) < 0 else "#66BB6A"
+                    hud_text = f"Path {getattr(path, 'id', 1)} | Slack: {getattr(path, 'slack', 0.0):+.4f} ns"
+                    hud_font = QFont("Segoe UI", 8, QFont.Bold)
+                    painter.setFont(hud_font)
+                    fm = painter.fontMetrics()
+                    hw = fm.horizontalAdvance(hud_text) + 24
+                    hh = fm.height() + 8
+                    hud_rect = QRectF(sp_start.x() + 12, sp_start.y() - hh / 2.0, hw, hh)
+
+                    painter.setPen(QPen(QColor("#FFE600"), 1))
+                    painter.setBrush(QColor(15, 20, 30, 230))
+                    painter.drawRoundedRect(hud_rect, 4, 4)
+
+                    painter.setFont(hud_font)
+                    painter.setPen(QColor(slack_col))
+                    painter.drawText(hud_rect, Qt.AlignCenter, hud_text)
+
+            elif len(self._timing_path_points) == 1:
+                sp_start = self.dbuPointToScreen(self._timing_path_points[0])
+                painter.setBrush(QColor(76, 175, 80))
+                painter.setPen(QPen(Qt.white, 1.5))
+                painter.drawEllipse(sp_start, 7, 7)
+                painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+                painter.setPen(Qt.white)
+                painter.drawText(QRectF(sp_start.x() - 7, sp_start.y() - 7, 14, 14), Qt.AlignCenter, "S")
+
+                if self._active_timing_path:
+                    path = self._active_timing_path
+                    slack_col = "#FF5252" if getattr(path, "slack", 0.0) < 0 else "#66BB6A"
+                    hud_text = f"Path {getattr(path, 'id', 1)} | Slack: {getattr(path, 'slack', 0.0):+.4f} ns"
+                    hud_font = QFont("Segoe UI", 8, QFont.Bold)
+                    painter.setFont(hud_font)
+                    fm = painter.fontMetrics()
+                    hw = fm.horizontalAdvance(hud_text) + 24
+                    hh = fm.height() + 8
+                    hud_rect = QRectF(sp_start.x() + 12, sp_start.y() - hh / 2.0, hw, hh)
+
+                    painter.setPen(QPen(QColor("#FFE600"), 1))
+                    painter.setBrush(QColor(15, 20, 30, 230))
+                    painter.drawRoundedRect(hud_rect, 4, 4)
+
+                    painter.setFont(hud_font)
+                    painter.setPen(QColor(slack_col))
+                    painter.drawText(hud_rect, Qt.AlignCenter, hud_text)
         finally:
             painter.restore()
 

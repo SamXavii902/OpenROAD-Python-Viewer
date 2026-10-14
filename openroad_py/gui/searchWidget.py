@@ -249,6 +249,8 @@ class SearchDock(QDockWidget):
         max_pin_span = min(int(10000 * (die_w / 1000000.0 + 1)), int(die_w * 0.02))
 
         for bterm in block.getBTerms():
+            if not bterm.isIOPin():
+                continue
             bbox = bterm.getBBox()
             pin_count += 1
             # If the raw pin box is gigantic (e.g. power rings or macro pads), clamp the search rect around its center

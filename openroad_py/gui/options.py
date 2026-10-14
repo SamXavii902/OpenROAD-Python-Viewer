@@ -79,6 +79,8 @@ class DisplayOptions:
         self._detailed_visibility: bool = False
         self._show_density_heatmap: bool = False
         self._show_flightlines: bool = True
+        self._show_die_boundary: bool = True
+        self._show_polygon_boundary: bool = True
 
         # Colors
         self._site_color: QColor = QColor(0, 0xFF, 0, 0x70)
@@ -88,9 +90,10 @@ class DisplayOptions:
         self._macro_border_color: QColor = QColor(210, 140, 255)
         self._cell_color: QColor = QColor(120, 120, 120)
         self._die_color: QColor = QColor(180, 180, 180)
-        self._core_color: QColor = QColor(90, 90, 90)
+        self._core_color: QColor = QColor(0, 210, 255)
         self._io_pin_color: QColor = QColor(76, 175, 80)
         self._ruler_color: QColor = QColor(255, 235, 59)
+
 
     def tech_init(self, tech: dbTech) -> None:
         """Initializes default layer colors and patterns matching OpenROAD DisplayControls::techInit."""
@@ -270,8 +273,27 @@ class DisplayOptions:
     def setCoreColor(self, color: QColor) -> None:
         self._core_color = color
 
+    def polygonColor(self) -> QColor:
+        return self._core_color
+
+    def setPolygonColor(self, color: QColor) -> None:
+        self._core_color = color
+
+    def isDieBoundaryVisible(self) -> bool:
+        return self._show_die_boundary
+
+    def setDieBoundaryVisible(self, visible: bool) -> None:
+        self._show_die_boundary = visible
+
+    def isPolygonBoundaryVisible(self) -> bool:
+        return self._show_polygon_boundary
+
+    def setPolygonBoundaryVisible(self, visible: bool) -> None:
+        self._show_polygon_boundary = visible
+
     def ioPinColor(self) -> QColor:
         return self._io_pin_color
+
 
     def setIoPinColor(self, color: QColor) -> None:
         self._io_pin_color = color

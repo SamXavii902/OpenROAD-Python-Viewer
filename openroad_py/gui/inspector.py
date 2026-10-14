@@ -115,8 +115,18 @@ class InspectorDock(QDockWidget):
         self._add_row(grp_geom, "Die Width", f"{w_um:,.2f} µm ({w_um/1000:.3f} mm)")
         self._add_row(grp_geom, "Die Height", f"{h_um:,.2f} µm ({h_um/1000:.3f} mm)")
         self._add_row(grp_geom, "Total Die Area", f"{area_mm2:.4f} mm² ({w_um*h_um:,.0f} µm²)")
+        if block.hasComplexDiePolygon():
+            die_poly = block.getDieAreaPolygon()
+            poly_pts = die_poly.getPoints()
+            poly_area_um2 = die_poly.area() / float(dbu * dbu)
+            poly_area_mm2 = poly_area_um2 / 1e6
+            self._add_row(grp_geom, "Boundary Shape", f"Rectilinear Polygon ({len(poly_pts)} vertices)")
+            self._add_row(grp_geom, "Polygon Floorplan Area", f"{poly_area_mm2:.4f} mm² ({poly_area_um2:,.0f} µm²)")
+        else:
+            self._add_row(grp_geom, "Boundary Shape", "Rectangular (4 vertices)")
         aspect = (w_um / h_um) if h_um > 0 else 1.0
         self._add_row(grp_geom, "Aspect Ratio (W:H)", f"{aspect:.3f}")
+
 
         # 3. Components Breakdown
         insts = list(block.getInsts())
@@ -163,7 +173,7 @@ class InspectorDock(QDockWidget):
         self._add_row(grp_nets, "Routed Vias", f"{total_vias:,}")
 
         # 5. IO Terminals
-        bterms = list(block.getBTerms())
+        bterms = [bterm for bterm in block.getBTerms() if bterm.isIOPin()]
         grp_io = QTreeWidgetItem(self._tree, ["Primary IO Ports", f"{len(bterms):,} pins"])
         self._add_row(grp_io, "Total IO Pins", f"{len(bterms):,}")
 

@@ -188,3 +188,25 @@ def test_display_controls_and_options(main_win):
             assert len(viewer._flightlines) > 0
 
 
+def test_legend_and_controls_polygon_boundary(main_win):
+    """Verifies that LegendDock and DisplayControls expose both rectangular die boundary and polygon boundary."""
+    from openroad_py.gui.legend import LegendItem
+    from PySide6.QtGui import QColor
+
+    legend_items = main_win._legend.findChildren(LegendItem)
+    titles = [it._title for it in legend_items]
+    assert any("Die Boundary" in t for t in titles)
+    assert any("Polygon" in t for t in titles)
+
+    poly_item = next(it for it in legend_items if "Polygon" in it._title)
+    assert poly_item._swatch._is_polygon is True
+    # Trigger swatch paintEvent to ensure polygon swatch renders cleanly
+    poly_item._swatch.grab()
+
+    # Changing polygon color via callback updates viewer options
+    new_col = QColor(255, 120, 0)
+    poly_item._on_color_changed(new_col)
+    assert main_win._viewer.getOptions().polygonColor() == new_col
+
+
+

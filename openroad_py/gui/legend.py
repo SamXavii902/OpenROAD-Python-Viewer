@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QPushButton,
 )
-from PySide6.QtGui import QColor, QFont
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
+from PySide6.QtCore import Qt, Signal, QPointF
 
 
 class ClickableSwatch(QFrame):
@@ -27,6 +27,7 @@ class ClickableSwatch(QFrame):
         is_filled: bool = True,
         border_color: Optional[QColor] = None,
         is_dashed: bool = False,
+        is_polygon: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -34,12 +35,20 @@ class ClickableSwatch(QFrame):
         self._is_filled = is_filled
         self._border_color = border_color
         self._is_dashed = is_dashed
+        self._is_polygon = is_polygon
         self.setFixedSize(30, 30)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("Click to open color wheel and customize layout color")
         self.update_style()
 
     def update_style(self) -> None:
+        if self._is_polygon:
+            self.setStyleSheet(
+                "ClickableSwatch { background-color: #18181c; border: 1px solid #44444e; border-radius: 4px; } "
+                "ClickableSwatch:hover { border: 2px solid #FFFFFF; }"
+            )
+            self.update()
+            return
         b_col = self._border_color.name() if self._border_color else self._color.name()
         dash_style = "dashed" if self._is_dashed else "solid"
         border_css = f"border: 2px {dash_style} {b_col};"
@@ -48,6 +57,35 @@ class ClickableSwatch(QFrame):
             f"ClickableSwatch {{ {bg_css} {border_css} border-radius: 4px; }} "
             f"ClickableSwatch:hover {{ border: 2px solid #FFFFFF; }}"
         )
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._is_polygon:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        # Draw outer faint die rectangle reference
+        painter.setPen(QPen(QColor(110, 110, 120, 140), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(4, 4, 21, 21)
+        # Draw stepped rectilinear polygon outline inside swatch
+        b_col = self._border_color if self._border_color else self._color
+        pen = QPen(b_col, 2, Qt.DashLine if self._is_dashed else Qt.SolidLine)
+        painter.setPen(pen)
+        poly = QPolygonF([
+            QPointF(4, 4),
+            QPointF(12, 4),
+            QPointF(12, 10),
+            QPointF(19, 10),
+            QPointF(19, 16),
+            QPointF(25, 16),
+            QPointF(25, 25),
+            QPointF(10, 25),
+            QPointF(10, 20),
+            QPointF(4, 20),
+        ])
+        painter.drawPolygon(poly)
+        painter.end()
 
     def setColor(self, color: QColor, border_color: Optional[QColor] = None) -> None:
         self._color = color
@@ -77,6 +115,7 @@ class LegendItem(QFrame):
         is_filled: bool = True,
         border_color: Optional[QColor] = None,
         is_dashed: bool = False,
+        is_polygon: bool = False,
         on_color_changed: Optional[Callable[[QColor], None]] = None,
         parent=None,
     ):
@@ -99,10 +138,12 @@ class LegendItem(QFrame):
             is_filled=is_filled,
             border_color=border_color,
             is_dashed=is_dashed,
+            is_polygon=is_polygon,
             parent=self,
         )
         self._swatch.clicked.connect(self._open_color_picker)
         layout.addWidget(self._swatch)
+
 
         # Text layout
         text_layout = QVBoxLayout()
@@ -286,7 +327,7 @@ class LegendDock(QDockWidget):
             )
         )
 
-        # 6. Die Area
+        # 6. Die Area (Rectangular Bounding Box)
         def on_die_color(c: QColor):
             opt = get_opt()
             if opt:
@@ -295,8 +336,8 @@ class LegendDock(QDockWidget):
 
         item_layout.addWidget(
             LegendItem(
-                "Die Boundary",
-                "Outer solid rectangle defining the physical silicon chip perimeter.",
+                "Die Boundary (Rectangular)",
+                "Outer solid rectangle defining the overall silicon die bounding box perimeter.",
                 color=QColor(180, 180, 180),
                 is_filled=False,
                 border_color=QColor(200, 200, 200),
@@ -304,23 +345,26 @@ class LegendDock(QDockWidget):
             )
         )
 
-        # 7. Core Area
+        # 7. Polygon / Core Boundary (Complex Floorplan Shape)
         def on_core_color(c: QColor):
             opt = get_opt()
             if opt:
-                opt.setCoreColor(c)
+                opt.setPolygonColor(c)
                 repaint()
 
         item_layout.addWidget(
             LegendItem(
-                "Core Boundary",
-                "Inner dashed rectangle enclosing the legal standard cell placement rows.",
-                color=QColor(90, 90, 90),
+                "Polygon / Core Boundary",
+                "Inner dashed rectilinear polygon outline wrapping the complex floorplan shape, macros, and placement rows.",
+                color=QColor(0, 210, 255),
                 is_filled=False,
+                border_color=QColor(0, 210, 255),
                 is_dashed=True,
+                is_polygon=True,
                 on_color_changed=on_core_color,
             )
         )
+
 
         # 8. I/O Pins
         def on_io_color(c: QColor):

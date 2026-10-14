@@ -184,20 +184,8 @@ class RenderThread(QThread):
         options = self._viewer.getOptions()
         search = self._viewer.getSearch()
 
-        # 1. Die Area & Core Area outlines (L1174-1200)
-        die_rect = block.getDieArea()
-        if die_rect.area() > 0:
-            painter.setPen(QPen(options.dieColor(), 0))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(die_rect.xMin(), die_rect.yMin(), die_rect.dx(), die_rect.dy())
-
-        core_rect = block.getCoreArea()
-        if core_rect.area() > 0:
-            pen = QPen(options.coreColor(), 0, Qt.DashLine)
-            pen.setCosmetic(True)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(core_rect.xMin(), core_rect.yMin(), core_rect.dx(), core_rect.dy())
+        # 1. Die Area & Polygon / Core Area outlines (L1174-1200)
+        self.drawBoundaries(painter, block)
 
         if self._restart:
             return
@@ -242,17 +230,54 @@ class RenderThread(QThread):
         if self._restart:
             return
 
-        # 6. Draw instance names (L1273)
-        if options.areInstanceNamesVisible():
-            self.drawInstanceNames(painter, insts)
-
-        # 7. Draw rows & sites (L1280)
+        # 6. Draw rows & sites (L1280)
         if options.areRowsVisible():
             self.drawRows(painter, block, bounds)
 
-        # 8. Draw IO pins (L1233)
+        # 7. Re-draw Die & Polygon outlines on top of blockages/macros so boundaries remain unbroken
+        self.drawBoundaries(painter, block)
+
+        # 8. Draw instance names (L1273)
+        if options.areInstanceNamesVisible():
+            self.drawInstanceNames(painter, insts)
+
+        # 9. Draw IO pins (L1233)
         if options.areIOPinsVisible():
             self.drawIOPins(painter, block, bounds)
+
+    def drawBoundaries(self, painter: QPainter, block: dbBlock) -> None:
+        options = self._viewer.getOptions()
+
+        # 1. Outer Rectangular Die Boundary
+        die_rect = block.getDieArea()
+        if options.isDieBoundaryVisible() and die_rect.area() > 0:
+            die_pen = QPen(options.dieColor(), 1)
+            die_pen.setCosmetic(True)
+            painter.setPen(die_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(die_rect.xMin(), die_rect.yMin(), die_rect.dx(), die_rect.dy())
+
+        # 2. Second Outline: Complex Polygon / Core Shape wrapping design elements
+        if options.isPolygonBoundaryVisible():
+            poly_pen = QPen(options.polygonColor(), 2, Qt.DashLine)
+            poly_pen.setCosmetic(True)
+            painter.setPen(poly_pen)
+            painter.setBrush(Qt.NoBrush)
+
+            if block.hasComplexDiePolygon():
+                die_poly = block.getDieAreaPolygon()
+                qpoly = QPolygonF([QPointF(p.x, p.y) for p in die_poly.getPoints()])
+                painter.drawPolygon(qpoly)
+
+            core_poly = block.getCoreAreaPolygon()
+            if len(core_poly.getPoints()) > 4:
+                qcore = QPolygonF([QPointF(p.x, p.y) for p in core_poly.getPoints()])
+                painter.drawPolygon(qcore)
+            else:
+                core_rect = block.getCoreArea()
+                if core_rect.area() > 0:
+                    painter.drawRect(core_rect.xMin(), core_rect.yMin(), core_rect.dx(), core_rect.dy())
+
 
     # Ported from: gui/src/renderThread.cpp:271 addInstTransform
     def addInstTransform(self, xfm: QTransform, inst_xfm) -> None:
@@ -600,8 +625,146 @@ class RenderThread(QThread):
             rb = row.getBBox()
             painter.drawRect(rb.xMin(), rb.yMin(), rb.dx(), rb.dy())
 
-    # Ported from: gui/src/renderThread.cpp:1681 drawIOPins
     def drawIOPins(self, painter: QPainter, block: dbBlock, bounds: Rect) -> None:
+        options = self._viewer.getOptions()
+        if not options.areIOPinsVisible():
+            return
+
+        die_rect = block.getDieArea()
+        if die_rect.area() <= 0:
+            die_rect = block.getBBox()
+        if die_rect.area() <= 0:
+            return
+
+        ppd = self._viewer.pixels_per_dbu
+        if ppd <= 0:
+            return
+
+        tech = block.getTech()
+        dbu_per_micron = tech.getDbuPerMicron() if tech else 1000
+        min_pin_dbu = 6.0 / ppd
+        min_axis_dbu = 1.5 / ppd
+        pin_color = options.ioPinColor()
+        if ppd * dbu_per_micron < 4.0:
+            painter.setPen(Qt.NoPen)
+        else:
+            painter.setPen(QPen(pin_color.darker(140), max(0.4, 0.8 / ppd)))
+        painter.setBrush(QBrush(pin_color))
+        max_pin_w = max(die_rect.dx() * 0.02, min_pin_dbu)
+        max_pin_h = max(die_rect.dy() * 0.02, min_pin_dbu)
+
+        show_names = (
+            options.areIOPinNamesVisible()
+            and self._viewer.nominalViewableResolution() <= 1000
+            and ppd * dbu_per_micron >= 3.5
+        )
+        font = QFont("Segoe UI", 8, QFont.Medium)
+        metrics = QFontMetrics(font)
+        drawn_label_rects = []
+        orientation_edges = {
+            "R0": "top",
+            "MY": "top",
+            "R180": "bottom",
+            "MX": "bottom",
+            "R90": "left",
+            "MYR90": "left",
+            "R270": "right",
+            "MXR90": "right",
+        }
+
+        for bterm in block.getBTerms():
+            if self._restart:
+                break
+            if not bterm.isIOPin():
+                continue
+
+            for bpin in bterm.getBPins():
+                pin_shapes = [box for _, box in bpin.getBoxes()]
+                pin_shapes.extend(poly.getEnclosingRect() for _, poly in bpin.getPolygons())
+                if not pin_shapes and bpin.hasLoc():
+                    loc = bpin.getLoc()
+                    pin_shapes.append(Rect(loc.x - 140, loc.y - 140, loc.x + 140, loc.y + 140))
+
+                pin_orient = bpin.getOrient()
+                edge = orientation_edges.get(pin_orient.name if pin_orient else "")
+                for shape in pin_shapes:
+                    if self._restart:
+                        break
+                    if shape.area() <= 0:
+                        continue
+
+                    expand = int(min_pin_dbu)
+                    if not Rect(shape.xMin() - expand, shape.yMin() - expand,
+                                shape.xMax() + expand, shape.yMax() + expand).intersects(bounds):
+                        continue
+
+                    cx = (shape.xMin() + shape.xMax()) / 2.0
+                    cy = (shape.yMin() + shape.yMax()) / 2.0
+                    shape_edge = edge
+                    if shape_edge is None:
+                        distances = {
+                            "left": abs(cx - die_rect.xMin()),
+                            "right": abs(cx - die_rect.xMax()),
+                            "bottom": abs(cy - die_rect.yMin()),
+                            "top": abs(cy - die_rect.yMax()),
+                        }
+                        shape_edge = min(distances, key=distances.get)
+
+                    if shape_edge in ("bottom", "top"):
+                        pin_w = min(max(shape.dx(), min(min_pin_dbu, min_axis_dbu)), max_pin_w)
+                        pin_h = min(max(shape.dy(), min_pin_dbu), max_pin_h)
+                    else:
+                        pin_w = min(max(shape.dx(), min_pin_dbu), max_pin_w)
+                        pin_h = min(max(shape.dy(), min(min_pin_dbu, min_axis_dbu)), max_pin_h)
+                    painter.drawRect(QRectF(cx - pin_w / 2, cy - pin_h / 2, pin_w, pin_h))
+
+                    if not show_names:
+                        continue
+
+                    name = bterm.getName().split("/")[-1]
+                    if len(name) > 16:
+                        name = name[:14] + ".."
+                    text_w = metrics.horizontalAdvance(name)
+                    text_h = metrics.height()
+                    gap = 6.0 / ppd
+                    label_point = {
+                        "bottom": QPointF(cx, cy - pin_h / 2 - gap),
+                        "top": QPointF(cx, cy + pin_h / 2 + gap),
+                        "left": QPointF(cx - pin_w / 2 - gap, cy),
+                        "right": QPointF(cx + pin_w / 2 + gap, cy),
+                    }[shape_edge]
+                    screen_point = painter.transform().map(label_point)
+
+                    if shape_edge in ("bottom", "top"):
+                        label_rect = QRectF(screen_point.x() - text_h / 2,
+                                            screen_point.y() - text_w if shape_edge == "top" else screen_point.y(),
+                                            text_h, text_w)
+                    else:
+                        label_rect = QRectF(screen_point.x() - text_w if shape_edge == "left" else screen_point.x(),
+                                            screen_point.y() - text_h / 2, text_w, text_h)
+                    if any(label_rect.intersects(previous) for previous in drawn_label_rects):
+                        continue
+                    drawn_label_rects.append(label_rect)
+
+                    painter.save()
+                    painter.setFont(font)
+                    painter.setPen(QPen(options.instanceNameColor(), 0))
+                    painter.translate(label_point)
+                    painter.scale(1.0 / ppd, -1.0 / ppd)
+                    if shape_edge == "bottom":
+                        painter.rotate(90)
+                        painter.drawText(0, text_h // 3, name)
+                    elif shape_edge == "top":
+                        painter.rotate(-90)
+                        painter.drawText(0, text_h // 3, name)
+                    elif shape_edge == "left":
+                        painter.drawText(-text_w, text_h // 3, name)
+                    else:
+                        painter.drawText(0, text_h // 3, name)
+                    painter.restore()
+
+    # Legacy implementation retained temporarily for comparison while keeping the public renderer stable.
+    def _drawIOPinsLegacy(self, painter: QPainter, block: dbBlock, bounds: Rect) -> None:
         options = self._viewer.getOptions()
         if not options.areIOPinsVisible():
             return
@@ -648,6 +811,8 @@ class RenderThread(QThread):
         for bterm in block.getBTerms():
             if self._restart:
                 break
+            if not bterm.isIOPin():
+                continue
 
             io_type = bterm.getIoType()
             lname = bterm.getName().lower()

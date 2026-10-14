@@ -197,6 +197,15 @@ class dbBTerm:
     def setSigType(self, sig_type: dbSigType) -> None:
         self._sig_type = sig_type
 
+    def isSpecial(self) -> bool:
+        return self._sig_type in (dbSigType.POWER, dbSigType.GROUND)
+
+    def isIOPin(self) -> bool:
+        if self.isSpecial():
+            return False
+        pin_names = self._block.getIOPinNames()
+        return pin_names is None or self._name in pin_names
+
     def getIoType(self) -> dbIoType:
         return self._io_type
 
@@ -504,6 +513,7 @@ class dbBlock:
         self._nets_by_name: Dict[str, dbNet] = {}
         self._bterms: List[dbBTerm] = []
         self._bterms_by_name: Dict[str, dbBTerm] = {}
+        self._io_pin_names: Optional[set[str]] = None
         self._rows: List[dbRow] = []
         self._track_grids: Dict[str, dbTrackGrid] = {}
         self._obstructions: List[dbObstruction] = []
@@ -535,6 +545,15 @@ class dbBlock:
     def setDieAreaPolygon(self, poly: Polygon) -> None:
         self._die_area_poly = poly
         self._die_area_rect = poly.getEnclosingRect()
+
+    def hasComplexDiePolygon(self) -> bool:
+        pts = self._die_area_poly.getPoints()
+        if len(pts) > 4:
+            return True
+        if len(pts) >= 3 and pts != self._die_area_rect.getPoints():
+            return True
+        return False
+
 
     def getCoreArea(self) -> Rect:
         return self._core_area_rect
@@ -575,6 +594,12 @@ class dbBlock:
 
     def getBTerms(self) -> List[dbBTerm]:
         return self._bterms
+
+    def getIOPinNames(self) -> Optional[set[str]]:
+        return self._io_pin_names
+
+    def setIOPinNames(self, pin_names: set[str]) -> None:
+        self._io_pin_names = pin_names
 
     def findBTerm(self, name: str) -> Optional[dbBTerm]:
         return self._bterms_by_name.get(name)

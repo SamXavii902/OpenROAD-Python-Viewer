@@ -12,6 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description="OpenROAD Native Python LEF/DEF Layout Viewer")
     parser.add_argument("--lef", action="append", default=[], help="Path to LEF/TLEF file (can be repeated)")
     parser.add_argument("--def", dest="def_file", help="Path to DEF file")
+    parser.add_argument("--timing", "-t", dest="timing_file", help="Path to timing report (.tarpt, .btarpt, .rpt)")
     parser.add_argument("--dir", "-d", dest="folder", help="Path to design directory containing LEF and DEF files")
     parser.add_argument("design_folder", nargs="?", default=None, help="Optional design folder to open directly")
 
@@ -58,6 +59,10 @@ def main():
             window.load_lef(lef_path)
         if args.def_file:
             window.load_def(args.def_file)
+
+    if args.timing_file and os.path.exists(args.timing_file):
+        window._timing_dock.load_file(args.timing_file)
+        window._timing_dock.show()
 
     window.show()
     sys.exit(app.exec())

@@ -194,5 +194,20 @@ class Polygon:
         yhi = max(p.y for p in self._points)
         return Rect(xlo, ylo, xhi, yhi)
 
+    def area(self) -> int:
+        n = len(self._points)
+        if n < 3:
+            return 0
+        twice_area = 0
+        for i in range(n):
+            p1 = self._points[i]
+            p2 = self._points[(i + 1) % n]
+            twice_area += p1.x * p2.y - p2.x * p1.y
+        return abs(twice_area) // 2
+
+    def __len__(self) -> int:
+        return len(self._points)
+
     def __repr__(self) -> str:
         return f"Polygon({self._points})"
+

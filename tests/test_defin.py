@@ -195,6 +195,63 @@ END DESIGN
     assert "Signal Nets" in stage_names
 
 
+def test_bterm_special_classification_from_def_use(tmp_path):
+    def_content = """VERSION 5.8 ;
+DESIGN pin_types ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+PINS 4 ;
+- signal + USE SIGNAL + PLACED ( 100 100 ) N ;
+- vdd + USE POWER + PLACED ( 200 100 ) N ;
+- vss + USE GROUND + PLACED ( 300 100 ) N ;
+- clock + USE CLOCK + PLACED ( 400 100 ) N ;
+END PINS
+END DESIGN
+"""
+    def_file = tmp_path / "pin_types.def"
+    def_file.write_text(def_content)
+
+    block = DefParser(dbDatabase()).parse_file(str(def_file))
+    terms = {bterm.getName(): bterm for bterm in block.getBTerms()}
+
+    assert not terms["signal"].isSpecial()
+    assert terms["vdd"].isSpecial()
+    assert terms["vss"].isSpecial()
+    assert not terms["clock"].isSpecial()
+    assert terms["signal"].isIOPin()
+    assert terms["clock"].isIOPin()
+    assert not terms["vdd"].isIOPin()
+
+
+def test_io_tcl_whitelists_design_pins_from_parent_directory(tmp_path):
+    design_dir = tmp_path / "eth_design"
+    design_dir.mkdir()
+    def_file = design_dir / "Eth_def.def"
+    def_file.write_text("""VERSION 5.8 ;
+DESIGN Ethernet_SS ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+PINS 3 ;
+- listed + USE SIGNAL + PLACED ( 100 100 ) N ;
+- omitted + USE SIGNAL + PLACED ( 200 100 ) N ;
+- vdd + USE POWER + PLACED ( 300 100 ) N ;
+END PINS
+END DESIGN
+""")
+    (tmp_path / "io.tcl").write_text("""# Design: Ethernet_SS
+(iopin
+    (pin name="listed" offset=1.0 layer=5 width=0.04 depth=0.22)
+)
+""")
+
+    block = DefParser(dbDatabase()).parse_file(str(def_file))
+    terms = {bterm.getName(): bterm for bterm in block.getBTerms()}
+
+    assert terms["listed"].isIOPin()
+    assert not terms["omitted"].isIOPin()
+    assert not terms["vdd"].isIOPin()
+
+
 def test_macro_orientations_bbox(tmp_path):
     """Verify that macros placed with N (R0), FN (MY), FS (MX), and S (R180) are positioned correctly
 

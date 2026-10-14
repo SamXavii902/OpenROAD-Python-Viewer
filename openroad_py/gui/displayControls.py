@@ -89,6 +89,8 @@ class DisplayControls(QDockWidget):
         self._objects_group.setExpanded(True)
 
         categories = [
+            ("Die Boundary (Rect)", options.isDieBoundaryVisible(), "_show_die_boundary"),
+            ("Polygon / Core Outline", options.isPolygonBoundaryVisible(), "_show_polygon_boundary"),
             ("Standard Cells", options.areStandardCellsVisible(), "_show_standard_cells"),
             ("Macros", options.areMacrosVisible(), "_show_macros"),
             ("Instance Outlines", options.areInstanceOutlinesVisible(), "_show_instance_outlines"),
@@ -107,13 +109,19 @@ class DisplayControls(QDockWidget):
             ("Ratsnest Flightlines", options.showFlightlines(), "_show_flightlines"),
         ]
 
+        color_map = {
+            "_show_die_boundary": options.dieColor(),
+            "_show_polygon_boundary": options.polygonColor(),
+            "_show_io_pins": options.ioPinColor(),
+        }
+
         for name, checked, attr in categories:
             item = QTreeWidgetItem(self._objects_group, [name])
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
             item.setData(0, Qt.UserRole, attr)
-            if attr == "_show_io_pins":
-                item.setIcon(1, self._create_color_icon(options.ioPinColor()))
+            if attr in color_map:
+                item.setIcon(1, self._create_color_icon(color_map[attr]))
             self._object_items[attr] = item
 
     def sync_option(self, attr: str, checked: bool) -> None:
@@ -153,8 +161,8 @@ class DisplayControls(QDockWidget):
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         data = item.data(0, Qt.UserRole)
+        options = self._viewer.getOptions()
         if isinstance(data, dbTechLayer):
-            options = self._viewer.getOptions()
             curr_color = options.color(data)
             new_color = QColorDialog.getColor(curr_color, self, f"Select Color for {data.getName()}")
             if new_color.isValid():
@@ -162,3 +170,22 @@ class DisplayControls(QDockWidget):
                 options.setColor(data, new_color)
                 item.setIcon(1, self._create_color_icon(new_color))
                 self._viewer.fullRepaint()
+        elif data == "_show_die_boundary":
+            new_color = QColorDialog.getColor(options.dieColor(), self, "Select Die Boundary Color")
+            if new_color.isValid():
+                options.setDieColor(new_color)
+                item.setIcon(1, self._create_color_icon(new_color))
+                self._viewer.fullRepaint()
+        elif data == "_show_polygon_boundary":
+            new_color = QColorDialog.getColor(options.polygonColor(), self, "Select Polygon / Core Outline Color")
+            if new_color.isValid():
+                options.setPolygonColor(new_color)
+                item.setIcon(1, self._create_color_icon(new_color))
+                self._viewer.fullRepaint()
+        elif data == "_show_io_pins":
+            new_color = QColorDialog.getColor(options.ioPinColor(), self, "Select IO Pin Color")
+            if new_color.isValid():
+                options.setIoPinColor(new_color)
+                item.setIcon(1, self._create_color_icon(new_color))
+                self._viewer.fullRepaint()
+

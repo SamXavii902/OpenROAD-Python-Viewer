@@ -1,6 +1,7 @@
 """DEF file parser ported from OpenROAD odb/src/defin/*."""
 
 import os
+import re
 from typing import Optional, List, Tuple, Callable
 from openroad_py.lefin.tokenizer import tokenize_stream, TokenReader
 from openroad_py.odb.geom import Rect, Polygon, Point
@@ -69,7 +70,31 @@ class DefParser:
             reader = TokenReader(tokenize_stream(f))
             self._parse_top(reader)
 
+        self._load_io_pin_names(filepath)
         return self._block
+
+    def _load_io_pin_names(self, def_filepath: str) -> None:
+        def_dir = os.path.dirname(os.path.abspath(def_filepath))
+        candidates = [os.path.join(def_dir, "io.tcl"), os.path.join(os.path.dirname(def_dir), "io.tcl")]
+        for idx, io_filepath in enumerate(dict.fromkeys(candidates)):
+            if not os.path.isfile(io_filepath):
+                continue
+            try:
+                with open(io_filepath, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except OSError:
+                continue
+
+            design_match = re.search(r"^\s*#\s*Design:\s*(\S+)", content, re.IGNORECASE | re.MULTILINE)
+            if design_match and design_match.group(1).casefold() != self._block.getName().casefold():
+                continue
+            if idx > 0 and not design_match:
+                continue
+
+            pin_names = set(re.findall(r'\(pin\s+name\s*=\s*"([^"]+)"', content, re.IGNORECASE))
+            if pin_names:
+                self._block.setIOPinNames(pin_names)
+                return
 
     def _notify_progress(self, stage: str, cur: int, total: int, detail: str = "", sub_fraction: float = 0.0) -> None:
         if not self._callback:
@@ -151,8 +176,10 @@ class DefParser:
         i = 0
         while i < len(tokens):
             if tokens[i] == "(":
-                x = int(tokens[i + 1])
-                y = int(tokens[i + 2])
+                x_tok = tokens[i + 1]
+                y_tok = tokens[i + 2]
+                x = pts[-1].x if (x_tok == "*" and pts) else int(round(float(x_tok)))
+                y = pts[-1].y if (y_tok == "*" and pts) else int(round(float(y_tok)))
                 pts.append(Point(x, y))
                 i += 4  # ( x y )
             else:
@@ -163,6 +190,7 @@ class DefParser:
         elif len(pts) > 2:
             poly = Polygon(pts)
             self._block.setDieAreaPolygon(poly)
+
 
     def _parse_row(self, reader: TokenReader) -> None:
         row_name = reader.next()

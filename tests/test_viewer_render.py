@@ -241,4 +241,86 @@ def test_viewer_iopin_names_rotation_and_collision_avoidance(qapp):
     viewer.close()
 
 
+def test_viewer_renders_ethernet_complex_polygon_and_rect_die_outlines(qapp, tmp_path):
+    """Verify that a complex rectilinear polygon DIEAREA (like Ethernet_SS) renders both:
+    1. The outer rectangular die bounding box outline, and
+    2. The second complex polygon outline wrapping the design shape.
+    """
+    eth_def = tmp_path / "eth_poly.def"
+    eth_def.write_text(
+        """VERSION 5.8 ;
+DESIGN Ethernet_SS ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 1979928 812925 ) ( 1838735 812925 )
+        ( 1838735 812944 ) ( 1750284 812944 )
+        ( 1750284 1452032 ) ( 1163504 1452032 )
+        ( 1163504 2035072 ) ( 295084 2035072 )
+        ( 295084 2684623 ) ( 0 2684623 )
+        ( 0 521984 ) ( 135040 521984 )
+        ( 135040 147968 ) ( 376960 147968 )
+        ( 376960 105984 ) ( 739968 105984 )
+        ( 739968 0 ) ( 1979928 0 ) ;
+END DESIGN
+"""
+    )
+
+    db = dbDatabase()
+    dp = DefParser(db)
+    block = dp.parse_file(str(eth_def))
+    chip = db.getChip()
+
+    assert block.hasComplexDiePolygon() is True
+    assert len(block.getDieAreaPolygon().getPoints()) == 18
+    assert block.getDieArea().dx() == 1979928
+    assert block.getDieArea().dy() == 2684623
+    assert block.getDieAreaPolygon().area() > 0
+    assert block.getDieAreaPolygon().area() < block.getDieArea().area()
+
+    viewer = LayoutViewer()
+    viewer.resize(800, 1000)
+    viewer.setChip(chip)
+    viewer.fit()
+
+    test_image = QImage(800, 1000, QImage.Format_ARGB32_Premultiplied)
+    draw_bounds = QRect(0, 0, 800, 1000)
+    viewer._render_thread.draw(test_image, draw_bounds)
+
+    # Check interior stepped segment midpoint: (729294, 2035072) on the top-middle step
+    from openroad_py.odb.geom import Point
+    pt_step = viewer.dbuPointToScreen(Point(729294, 2035072))
+    sx, sy = int(round(pt_step.x())), int(round(pt_step.y()))
+    found_poly_cyan = False
+    for dy in range(-3, 4):
+        for dx in range(-3, 4):
+            px, py = sx + dx, sy + dy
+            if 0 <= px < 800 and 0 <= py < 1000:
+                c = test_image.pixelColor(px, py)
+                if c.blue() > 150 and c.green() > 120:
+                    found_poly_cyan = True
+                    break
+        if found_poly_cyan:
+            break
+
+    assert found_poly_cyan, "Complex polygon step edge should be rendered in polygon outline color"
+
+    # Check outer rectangular die boundary on top-right cutaway edge: (1500000, 2684623)
+    pt_rect = viewer.dbuPointToScreen(Point(1500000, 2684623))
+    rx, ry = int(round(pt_rect.x())), int(round(pt_rect.y()))
+    found_die_gray = False
+    for dy in range(-3, 4):
+        for dx in range(-3, 4):
+            px, py = rx + dx, ry + dy
+            if 0 <= px < 800 and 0 <= py < 1000:
+                c = test_image.pixelColor(px, py)
+                if c.red() > 100 and c.green() > 100 and c.blue() > 100:
+                    found_die_gray = True
+                    break
+        if found_die_gray:
+            break
+
+    assert found_die_gray, "Outer rectangular die boundary should also be rendered"
+    viewer.close()
+
+
+
 
