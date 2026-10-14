@@ -131,6 +131,7 @@ class LayoutViewer(QWidget):
             self._options.tech_init(chip.getTech())
         if chip and chip.getBlock():
             self._search.build(chip.getBlock(), callback=progress_callback)
+            self._get_mbit_alias()
             self.fit()
         else:
             self.update()
@@ -357,8 +358,9 @@ class LayoutViewer(QWidget):
         if not self.hasDesign():
             return self._mbit_alias
         block = self._chip.getBlock()
-        for inst in block.getInsts():
-            name = inst.getName()
+        inst_dict = getattr(block, "_insts_by_name", None)
+        inst_items = inst_dict.items() if isinstance(inst_dict, dict) else [(inst.getName(), inst) for inst in block.getInsts()]
+        for name, inst in inst_items:
             if "CDN_MBIT_" in name:
                 if "/" in name:
                     parent, base = name.rsplit("/", 1)
@@ -373,12 +375,17 @@ class LayoutViewer(QWidget):
         return self._mbit_alias
 
     def _resolve_timing_path_points(self, path: Any) -> List[Point]:
-        """Resolves ordered physical DBU points along the timing path."""
+        """Resolves ordered physical DBU points along the timing path with caching."""
         if not self.hasDesign():
             return []
 
+        # Return cached points if already resolved
+        if hasattr(path, "_cached_points") and path._cached_points is not None:
+            return path._cached_points
+
         block = self._chip.getBlock()
         pts: List[Point] = []
+        alias_map = self._get_mbit_alias()
 
         def get_loc(pin_name: str) -> Optional[Point]:
             if not pin_name:
@@ -386,7 +393,7 @@ class LayoutViewer(QWidget):
             inst_name = pin_name.rsplit("/", 1)[0] if "/" in pin_name else pin_name
             inst = block.findInst(inst_name)
             if inst is None:
-                inst = self._get_mbit_alias().get(inst_name)
+                inst = alias_map.get(inst_name)
             if inst and inst.isPlaced():
                 return inst.getBBox().getBox().center()
             bterm = block.findBTerm(pin_name)
@@ -411,6 +418,11 @@ class LayoutViewer(QWidget):
         p_end = get_loc(getattr(path, "endpoint", ""))
         if p_end and (not pts or (p_end.x != pts[-1].x or p_end.y != pts[-1].y)):
             pts.append(p_end)
+
+        try:
+            path._cached_points = pts
+        except Exception:
+            pass
 
         return pts
 

@@ -311,3 +311,145 @@ def test_layout_viewer_hud_badge_and_single_point_render(qapp):
     finally:
         painter2.end()
 
+
+def test_manhattan_wirelength_computation(qapp):
+    """Verifies Manhattan wire length fallback is computed in microns when nets are unrouted."""
+    from openroad_py.odb.database import dbDatabase, dbChip
+    from openroad_py.odb.block import dbBlock, dbInst
+    from openroad_py.odb.lib import dbMaster
+    from openroad_py.odb.tech import dbTech
+    from openroad_py.odb.geom import Rect
+    from openroad_py.odb.types import dbPlacementStatus
+    from openroad_py.timing.tarpt_parser import TimingReportData
+
+    db = dbDatabase()
+    tech = dbTech(1000)  # 1000 dbu per micron
+    db.setTech(tech)
+    block = dbBlock(tech, "mockBlock")
+    block.setDieArea(Rect(0, 0, 1000000, 1000000))
+    chip = dbChip(db, block)
+
+    master = dbMaster("BUF_X1")
+    master.setWidth(1000)
+    master.setHeight(2000)
+
+    # Place 3 cells: i1 at (0, 0), i2 at (30000, 40000), i3 at (70000, 70000)
+    i1 = dbInst(block, master, "u1")
+    i1.setOrigin(0, 0)
+    i1.setPlacementStatus(dbPlacementStatus.PLACED)
+    block.addInst(i1)
+
+    i2 = dbInst(block, master, "u2")
+    i2.setOrigin(30000, 40000)
+    i2.setPlacementStatus(dbPlacementStatus.PLACED)
+    block.addInst(i2)
+
+    i3 = dbInst(block, master, "u3")
+    i3.setOrigin(70000, 70000)
+    i3.setPlacementStatus(dbPlacementStatus.PLACED)
+    block.addInst(i3)
+
+    path = TimingPath(
+        id=1,
+        slack=-0.05,
+        startpoint="u1/Q",
+        endpoint="u3/D",
+        cells=[("BUF_X1", "u2/A"), ("BUF_X1", "u2/Y")],
+    )
+
+    report_data = TimingReportData()
+    report_data.paths = [path]
+    report_data.compute_wire_lengths(chip)
+
+    # Distance: |30000-0| + |40000-0| = 70000 dbu = 70 µm
+    # Plus: |70000-30000| + |70000-40000| = 70000 dbu = 70 µm
+    # Total = 140 µm
+    assert path.sum_wire_length is not None
+    assert abs(path.sum_wire_length - 140.0) < 5.0
+
+
+def test_tables_resizable_headers_and_widths(qapp):
+    """Verifies that all tables use QHeaderView.Interactive and have wide columns."""
+    from PySide6.QtWidgets import QHeaderView
+
+    # PathListTable
+    plt = PathListTable()
+    h = plt._table.horizontalHeader()
+    for col in range(11):
+        assert h.sectionResizeMode(col) == QHeaderView.Interactive
+    # Startpoint Pin (col 7) and Endpoint Pin (col 8) should default to >= 250px
+    assert plt._table.columnWidth(7) >= 250
+    assert plt._table.columnWidth(8) >= 250
+
+    # PathCategoryTable
+    pct = PathCategoryTable()
+    h_pct = pct._table.horizontalHeader()
+    for col in range(pct._table.columnCount()):
+        assert h_pct.sectionResizeMode(col) == QHeaderView.Interactive
+
+    # OptimizationFailureReasonTable
+    ofr = OptimizationFailureReasonTable()
+    h_ofr = ofr._table.horizontalHeader()
+    for col in range(ofr._table.columnCount()):
+        assert h_ofr.sectionResizeMode(col) == QHeaderView.Interactive
+
+    # CategorySummaryWidget
+    csw = CategorySummaryWidget()
+    h_csw = csw._table.horizontalHeader()
+    assert h_csw.sectionResizeMode(0) == QHeaderView.Interactive
+
+
+def test_clipboard_copy_and_tooltips(qapp):
+    """Verifies Ctrl+C copying from CopyableTableWidget and cell tooltips."""
+    from PySide6.QtGui import QKeySequence, QKeyEvent
+    from PySide6.QtCore import QEvent
+
+    plt = PathListTable()
+    p = TimingPath(
+        id=42,
+        slack=-0.015,
+        required_time=2.5,
+        arrival_time=2.515,
+        startpoint="long/hierarchical/name/regA/CP",
+        endpoint="long/hierarchical/name/regB/D",
+        launch_clock="clk_core",
+        capture_clock="clk_core",
+        logic_level=4,
+        sum_wire_length=123.45,
+        failure_reason="Setup Check",
+    )
+    plt.set_paths([p])
+
+    # Check tooltips
+    item_start = plt._table.item(0, 7)
+    assert item_start.toolTip() == "long/hierarchical/name/regA/CP"
+    item_end = plt._table.item(0, 8)
+    assert item_end.toolTip() == "long/hierarchical/name/regB/D"
+    item_slack = plt._table.item(0, 4)
+    assert "-0.0150" in item_slack.toolTip()
+
+    # Check copy selection to clipboard
+    plt._table.clearSelection()
+    item_start.setSelected(True)
+    plt._table.copy_selection_to_clipboard()
+    cb_text = QApplication.clipboard().text()
+    assert cb_text == "long/hierarchical/name/regA/CP"
+
+
+def test_timing_report_upper_splitter(qapp):
+    """Verifies that Histogram and Category Summary are placed in a resizable QSplitter."""
+    from PySide6.QtWidgets import QSplitter
+
+    trw = TimingReportWidget()
+    trw.resize(900, 600)
+    # Find child splitters
+    splitters = trw.findChildren(QSplitter)
+    # Should have main vertical splitter and upper horizontal splitter
+    assert len(splitters) >= 2
+    horizontal_splitters = [s for s in splitters if s.orientation() == Qt.Horizontal]
+    assert len(horizontal_splitters) >= 1
+    # Check that children of horizontal splitter are hist_box and summary_box
+    upper = horizontal_splitters[0]
+    assert upper.count() == 2
+
+

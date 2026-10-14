@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
 
         # Bottom dock: Timing Report & Debugger (Cadence Innovus / Tempus UI)
         self._timing_dock = TimingReportDock(self)
+        self._timing_dock.setLayoutViewer(self._viewer)
         self.addDockWidget(Qt.BottomDockWidgetArea, self._timing_dock)
         self._timing_dock.hide()
 
@@ -453,7 +454,7 @@ class MainWindow(QMainWindow):
             progress.setLabelText("Indexing searchable components & nets...")
             QApplication.processEvents()
             self._search_dock.setChip(chip)
-            self._timing_dock.setChip(chip)
+            self._timing_dock.setChip(chip, layout_viewer=self._viewer)
             progress.setValue(97)
             QApplication.processEvents()
 
@@ -643,7 +644,7 @@ class MainWindow(QMainWindow):
             progress.setLabelText("Indexing objects for fast search...")
             QApplication.processEvents()
             self._search_dock.setChip(chip)
-            self._timing_dock.setChip(chip)
+            self._timing_dock.setChip(chip, layout_viewer=self._viewer)
             progress.setValue(97)
             QApplication.processEvents()
 

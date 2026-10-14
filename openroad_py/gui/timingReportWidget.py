@@ -24,6 +24,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QIcon,
+    QKeySequence,
     QLinearGradient,
     QMouseEvent,
     QPaintEvent,
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -293,8 +295,10 @@ class CategorySummaryWidget(QWidget):
         self._table = QTableWidget(8, 2)
         self._table.setHorizontalHeaderLabels(["Metric", "Value"])
         self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self._table.horizontalHeader().setStretchLastSection(True)
-        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._table.setColumnWidth(0, 110)
+        self._table.setColumnWidth(1, 140)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.setSelectionMode(QTableWidget.NoSelection)
         self._table.setShowGrid(True)
@@ -412,9 +416,13 @@ class PathCategoryTable(QWidget):
             }
         """)
 
+        self._table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        cat_widths = {0: 45, 1: 30, 2: 130, 3: 75, 4: 85, 5: 80, 6: 85, 7: 90}
+        for col, w in cat_widths.items():
+            self._table.setColumnWidth(col, w)
 
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self._table)
@@ -531,9 +539,13 @@ class OptimizationFailureReasonTable(QWidget):
             }
         """)
 
+        self._table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        reason_widths = {0: 45, 1: 30, 2: 200, 3: 75, 4: 85}
+        for col, w in reason_widths.items():
+            self._table.setColumnWidth(col, w)
 
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self._table)
@@ -585,6 +597,34 @@ class OptimizationFailureReasonTable(QWidget):
 # 5. Path List Table (Main Table with Pagination & 11 Columns)
 # ==============================================================================
 
+class CopyableTableWidget(QTableWidget):
+    """QTableWidget supporting Ctrl+C copy of selected cells to clipboard."""
+
+    def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.Copy):
+            self.copy_selection_to_clipboard()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def copy_selection_to_clipboard(self) -> None:
+        sel = self.selectedItems()
+        if not sel:
+            return
+        rows: Dict[int, Dict[int, str]] = {}
+        for it in sel:
+            r, c = it.row(), it.column()
+            if r not in rows:
+                rows[r] = {}
+            rows[r][c] = it.text()
+        lines = []
+        for r in sorted(rows.keys()):
+            cols = [rows[r][c] for c in sorted(rows[r].keys())]
+            lines.append("\t".join(cols))
+        text = "\n".join(lines)
+        QApplication.clipboard().setText(text)
+
+
 class PathListTable(QWidget):
     """Sortable, paginated table listing timing paths with all 11 columns."""
 
@@ -598,6 +638,7 @@ class PathListTable(QWidget):
         self._page_size: int = 50
         self._page_index: int = 0
         self._highlighted_ids: set[int] = set()
+        self._is_refreshing: bool = False
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -612,7 +653,7 @@ class PathListTable(QWidget):
             "Endpoint Pin", "View", "Failure Reason"
         ]
 
-        self._table = QTableWidget()
+        self._table = CopyableTableWidget()
         self._table.setColumnCount(len(self._headers))
         self._table.setHorizontalHeaderLabels(self._headers)
         self._table.verticalHeader().setVisible(False)
@@ -621,6 +662,7 @@ class PathListTable(QWidget):
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.setShowGrid(True)
         self._table.setSortingEnabled(False)  # Managed custom sorting for pagination
+        self._table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._table.setStyleSheet("""
             QTableWidget {
                 background-color: #1A1D24;
@@ -644,15 +686,32 @@ class PathListTable(QWidget):
         """)
 
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.Stretch)  # Startpoint pin
-        header.setSectionResizeMode(8, QHeaderView.Stretch)  # Endpoint pin
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        col_widths = {
+            0: 32,   # H
+            1: 55,   # Path
+            2: 100,  # Clock
+            3: 80,   # ReqTime
+            4: 80,   # Slack
+            5: 75,   # Logic Level
+            6: 130,  # Sum of Wire Length
+            7: 280,  # Startpoint Pin
+            8: 280,  # Endpoint Pin
+            9: 90,   # View
+            10: 160, # Failure Reason
+        }
+        for col, w in col_widths.items():
+            self._table.setColumnWidth(col, w)
         header.sectionClicked.connect(self._on_header_clicked)
 
         self._table.itemClicked.connect(self._on_item_clicked)
         self._table.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._table.itemChanged.connect(self._on_item_changed)
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
+
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_table_context_menu)
 
         self._layout.addWidget(self._table)
 
@@ -747,11 +806,7 @@ class PathListTable(QWidget):
         self._page_index = 0
         self._refresh_page()
 
-    def get_selected_path(self) -> Optional[TimingPath]:
-        sel = self._table.selectedItems()
-        if not sel:
-            return None
-        row = sel[0].row()
+    def _get_path_at_row(self, row: int) -> Optional[TimingPath]:
         pid_item = self._table.item(row, 1)
         if pid_item:
             try:
@@ -761,97 +816,153 @@ class PathListTable(QWidget):
                 pass
         return None
 
+    def get_selected_path(self) -> Optional[TimingPath]:
+        sel = self._table.selectedItems()
+        if not sel:
+            return None
+        return self._get_path_at_row(sel[0].row())
+
+    def _on_table_context_menu(self, pos: Any) -> None:
+        item = self._table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        path = self._get_path_at_row(row)
+        menu = QMenu(self)
+
+        cell_text = item.text()
+        trunc_cell = (cell_text[:35] + "...") if len(cell_text) > 35 else cell_text
+        act_copy_cell = menu.addAction(f"Copy Cell Text (\"{trunc_cell}\")")
+        act_copy_cell.triggered.connect(lambda: QApplication.clipboard().setText(cell_text))
+
+        if path:
+            s_pin = path.startpoint
+            trunc_s = (s_pin[:35] + "...") if len(s_pin) > 35 else s_pin
+            act_copy_start = menu.addAction(f"Copy Startpoint Pin (\"{trunc_s}\")")
+            act_copy_start.triggered.connect(lambda: QApplication.clipboard().setText(s_pin))
+
+            e_pin = path.endpoint
+            trunc_e = (e_pin[:35] + "...") if len(e_pin) > 35 else e_pin
+            act_copy_end = menu.addAction(f"Copy Endpoint Pin (\"{trunc_e}\")")
+            act_copy_end.triggered.connect(lambda: QApplication.clipboard().setText(e_pin))
+
+            menu.addSeparator()
+            act_copy_row = menu.addAction("Copy Full Path Info (TSV)")
+            wl_text = f"{path.sum_wire_length:,.2f} µm" if path.sum_wire_length is not None else "-"
+            row_vals = [
+                str(path.id), path.launch_clock, f"{path.required_time:.4f}",
+                f"{path.slack:+.4f}", str(path.logic_level), wl_text,
+                path.startpoint, path.endpoint, path.view, path.failure_reason
+            ]
+            act_copy_row.triggered.connect(lambda: QApplication.clipboard().setText("\t".join(row_vals)))
+
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
     def _refresh_page(self) -> None:
+        self._is_refreshing = True
         self._table.blockSignals(True)
-        total_items = len(self._paths)
+        try:
+            total_items = len(self._paths)
 
-        if self._page_size <= 0:
-            start_idx = 0
-            end_idx = total_items
-            num_pages = 1
-        else:
-            num_pages = max(1, math.ceil(total_items / float(self._page_size)))
-            self._page_index = max(0, min(self._page_index, num_pages - 1))
-            start_idx = self._page_index * self._page_size
-            end_idx = min(start_idx + self._page_size, total_items)
-
-        current_slice = self._paths[start_idx:end_idx]
-        self._table.setRowCount(len(current_slice))
-
-        for row, p in enumerate(current_slice):
-            # 0: H Checkbox
-            it_h = QTableWidgetItem()
-            it_h.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            chk = Qt.Checked if p.id in self._highlighted_ids else Qt.Unchecked
-            it_h.setCheckState(chk)
-            self._table.setItem(row, 0, it_h)
-
-            # 1: Path ID
-            it_id = QTableWidgetItem(str(p.id))
-            it_id.setTextAlignment(Qt.AlignCenter)
-            self._table.setItem(row, 1, it_id)
-
-            # 2: Clock
-            it_clk = QTableWidgetItem(p.launch_clock)
-            self._table.setItem(row, 2, it_clk)
-
-            # 3: ReqTime
-            it_req = QTableWidgetItem(f"{p.required_time:.4f}")
-            it_req.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self._table.setItem(row, 3, it_req)
-
-            # 4: Slack (colored red if < 0, green if >= 0)
-            it_slack = QTableWidgetItem(f"{p.slack:+.4f}")
-            it_slack.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            it_slack.setFont(QFont("Segoe UI", 8, QFont.Bold))
-            if p.slack < 0.0:
-                it_slack.setForeground(QColor("#FF5252"))
+            if self._page_size <= 0:
+                start_idx = 0
+                end_idx = total_items
+                num_pages = 1
             else:
-                it_slack.setForeground(QColor("#66BB6A"))
-            self._table.setItem(row, 4, it_slack)
+                num_pages = max(1, math.ceil(total_items / float(self._page_size)))
+                self._page_index = max(0, min(self._page_index, num_pages - 1))
+                start_idx = self._page_index * self._page_size
+                end_idx = min(start_idx + self._page_size, total_items)
 
-            # 5: Logic Level
-            it_level = QTableWidgetItem(str(p.logic_level))
-            it_level.setTextAlignment(Qt.AlignCenter)
-            self._table.setItem(row, 5, it_level)
+            current_slice = self._paths[start_idx:end_idx]
+            self._table.setRowCount(len(current_slice))
 
-            # 6: Sum of Wire Length
-            if p.sum_wire_length is not None:
-                wl_str = f"{p.sum_wire_length:,.2f} µm"
-            else:
-                wl_str = "-"
-            it_wl = QTableWidgetItem(wl_str)
-            it_wl.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self._table.setItem(row, 6, it_wl)
+            for row, p in enumerate(current_slice):
+                # 0: H Checkbox
+                it_h = QTableWidgetItem()
+                it_h.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                chk = Qt.Checked if p.id in self._highlighted_ids else Qt.Unchecked
+                it_h.setCheckState(chk)
+                it_h.setToolTip("Toggle path highlight on layout canvas")
+                self._table.setItem(row, 0, it_h)
 
-            # 7: Startpoint Pin
-            it_start = QTableWidgetItem(p.startpoint)
-            self._table.setItem(row, 7, it_start)
+                # 1: Path ID
+                it_id = QTableWidgetItem(str(p.id))
+                it_id.setTextAlignment(Qt.AlignCenter)
+                it_id.setToolTip(f"Path ID: {p.id}")
+                self._table.setItem(row, 1, it_id)
 
-            # 8: Endpoint Pin
-            it_end = QTableWidgetItem(p.endpoint)
-            self._table.setItem(row, 8, it_end)
+                # 2: Clock
+                it_clk = QTableWidgetItem(p.launch_clock)
+                it_clk.setToolTip(f"Launch Clock: {p.launch_clock}\nCapture Clock: {p.capture_clock}")
+                self._table.setItem(row, 2, it_clk)
 
-            # 9: View
-            it_view = QTableWidgetItem(p.view)
-            self._table.setItem(row, 9, it_view)
+                # 3: ReqTime
+                it_req = QTableWidgetItem(f"{p.required_time:.4f}")
+                it_req.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                it_req.setToolTip(f"Required Time: {p.required_time:.4f} ns")
+                self._table.setItem(row, 3, it_req)
 
-            # 10: Failure Reason
-            it_reason = QTableWidgetItem(p.failure_reason or p.status)
-            self._table.setItem(row, 10, it_reason)
+                # 4: Slack (colored red if < 0, green if >= 0)
+                it_slack = QTableWidgetItem(f"{p.slack:+.4f}")
+                it_slack.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                it_slack.setFont(QFont("Segoe UI", 8, QFont.Bold))
+                if p.slack < 0.0:
+                    it_slack.setForeground(QColor("#FF5252"))
+                else:
+                    it_slack.setForeground(QColor("#66BB6A"))
+                it_slack.setToolTip(f"Slack: {p.slack:+.4f} ns\nRequired: {p.required_time:.4f} ns\nArrival: {p.arrival_time:.4f} ns")
+                self._table.setItem(row, 4, it_slack)
 
-            self._table.setRowHeight(row, 18)
+                # 5: Logic Level
+                it_level = QTableWidgetItem(str(p.logic_level))
+                it_level.setTextAlignment(Qt.AlignCenter)
+                it_level.setToolTip(f"Logic Levels: {p.logic_level}")
+                self._table.setItem(row, 5, it_level)
 
-        self._lbl_page.setText(f"Page {self._page_index + 1} of {num_pages} ({total_items:,} paths)")
-        self._btn_first.setEnabled(self._page_index > 0)
-        self._btn_prev.setEnabled(self._page_index > 0)
-        self._btn_next.setEnabled(self._page_index < num_pages - 1)
-        self._btn_last.setEnabled(self._page_index < num_pages - 1)
+                # 6: Sum of Wire Length
+                if p.sum_wire_length is not None:
+                    wl_str = f"{p.sum_wire_length:,.2f} µm"
+                else:
+                    wl_str = "-"
+                it_wl = QTableWidgetItem(wl_str)
+                it_wl.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                it_wl.setToolTip(f"Estimated / Routed Wire Length: {wl_str}")
+                self._table.setItem(row, 6, it_wl)
 
-        self._table.blockSignals(False)
+                # 7: Startpoint Pin
+                it_start = QTableWidgetItem(p.startpoint)
+                it_start.setToolTip(p.startpoint)
+                self._table.setItem(row, 7, it_start)
+
+                # 8: Endpoint Pin
+                it_end = QTableWidgetItem(p.endpoint)
+                it_end.setToolTip(p.endpoint)
+                self._table.setItem(row, 8, it_end)
+
+                # 9: View
+                it_view = QTableWidgetItem(p.view)
+                it_view.setToolTip(f"View: {p.view}")
+                self._table.setItem(row, 9, it_view)
+
+                # 10: Failure Reason
+                it_reason = QTableWidgetItem(p.failure_reason or p.status)
+                it_reason.setToolTip(p.failure_reason or p.status)
+                self._table.setItem(row, 10, it_reason)
+
+                self._table.setRowHeight(row, 18)
+
+            self._lbl_page.setText(f"Page {self._page_index + 1} of {num_pages} ({total_items:,} paths)")
+            self._btn_first.setEnabled(self._page_index > 0)
+            self._btn_prev.setEnabled(self._page_index > 0)
+            self._btn_next.setEnabled(self._page_index < num_pages - 1)
+            self._btn_last.setEnabled(self._page_index < num_pages - 1)
+        finally:
+            self._table.blockSignals(False)
+            self._is_refreshing = False
 
     def _on_selection_changed(self) -> None:
-        if self._table.signalsBlocked():
+        if self._is_refreshing or self._table.signalsBlocked():
             return
         path = self.get_selected_path()
         if path:
@@ -878,6 +989,8 @@ class PathListTable(QWidget):
                 self.path_selected.emit(path, True)
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._is_refreshing:
+            return
         if item.column() == 0:
             row = item.row()
             pid_item = self._table.item(row, 1)
@@ -901,11 +1014,13 @@ class PathListTable(QWidget):
 
     def clear_all_highlights(self) -> None:
         self._highlighted_ids.clear()
+        self._is_refreshing = True
         self._table.blockSignals(True)
         self._table.clearSelection()
         self._table.blockSignals(False)
+        self._is_refreshing = False
         self._refresh_page()
-        self._emit_highlights()
+        self.paths_highlighted.emit([])
         self.path_selected.emit(None, False)
         self.paths_cleared.emit()
 
@@ -992,6 +1107,7 @@ class TimingReportWidget(QWidget):
         super().__init__(parent)
         self._report_data: Optional[TimingReportData] = None
         self._chip: Any = None
+        self._layout_viewer: Any = None
         self._parser = TarptParser()
 
         self._active_category: str = "all"
@@ -1000,6 +1116,10 @@ class TimingReportWidget(QWidget):
         self._active_search: str = ""
 
         self._setup_ui()
+
+    def setLayoutViewer(self, viewer: Any) -> None:
+        """Stores reference to LayoutViewer to reuse pre-indexed alias maps."""
+        self._layout_viewer = viewer
 
     def _setup_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -1013,11 +1133,10 @@ class TimingReportWidget(QWidget):
         main_splitter = QSplitter(Qt.Vertical)
         main_splitter.setChildrenCollapsible(False)
 
-        # Upper section (Histogram + Category Summary)
-        upper_widget = QWidget()
-        upper_layout = QHBoxLayout(upper_widget)
-        upper_layout.setContentsMargins(0, 0, 0, 0)
-        upper_layout.setSpacing(6)
+        # Upper section (Histogram + Category Summary) with horizontal resizable splitter
+        upper_splitter = QSplitter(Qt.Horizontal)
+        upper_splitter.setChildrenCollapsible(False)
+        upper_splitter.setStyleSheet("QSplitter::handle { background-color: #282C37; width: 3px; }")
 
         # Upper Left: Path Histogram Card
         hist_box = QFrame()
@@ -1042,7 +1161,7 @@ class TimingReportWidget(QWidget):
         self._hist_widget = PathHistogramWidget()
         self._hist_widget.bin_selected.connect(self._on_histogram_bin_selected)
         hist_layout.addWidget(self._hist_widget)
-        upper_layout.addWidget(hist_box, 3)
+        upper_splitter.addWidget(hist_box)
 
         # Upper Right: Category Summary Card
         summary_box = QFrame()
@@ -1057,9 +1176,10 @@ class TimingReportWidget(QWidget):
 
         self._summary_widget = CategorySummaryWidget()
         summary_layout.addWidget(self._summary_widget)
-        upper_layout.addWidget(summary_box, 2)
+        upper_splitter.addWidget(summary_box)
 
-        main_splitter.addWidget(upper_widget)
+        upper_splitter.setSizes([450, 300])
+        main_splitter.addWidget(upper_splitter)
 
         # Middle section: Tabbed Path Category & Optimization Failure Reason
         middle_tabs = QTabWidget()
@@ -1246,7 +1366,10 @@ class TimingReportWidget(QWidget):
 
         # If a chip is already attached, calculate wire lengths
         if self._chip is not None:
-            self._report_data.compute_wire_lengths(self._chip)
+            mbit_alias = None
+            if self._layout_viewer and hasattr(self._layout_viewer, "_get_mbit_alias"):
+                mbit_alias = self._layout_viewer._get_mbit_alias()
+            self._report_data.compute_wire_lengths(self._chip, mbit_alias=mbit_alias)
 
         # Update Histogram
         self._hist_widget.set_bins(report.histogram_bins)
@@ -1283,11 +1406,16 @@ class TimingReportWidget(QWidget):
         # Update Path List
         self._apply_filters()
 
-    def setChip(self, chip: Any) -> None:
-        """Attaches OpenROAD chip to calculate exact routed net lengths."""
+    def setChip(self, chip: Any, layout_viewer: Any = None) -> None:
+        """Attaches OpenROAD chip to calculate exact routed or Manhattan wire lengths."""
         self._chip = chip
+        if layout_viewer is not None:
+            self._layout_viewer = layout_viewer
         if self._report_data is not None and chip is not None:
-            self._report_data.compute_wire_lengths(chip)
+            mbit_alias = None
+            if self._layout_viewer and hasattr(self._layout_viewer, "_get_mbit_alias"):
+                mbit_alias = self._layout_viewer._get_mbit_alias()
+            self._report_data.compute_wire_lengths(chip, mbit_alias=mbit_alias)
             self._apply_filters()
 
     def _browse_file_dialog(self) -> None:
@@ -1399,6 +1527,9 @@ class TimingReportDock(QDockWidget):
     def load_file(self, file_path: str, show_progress: bool = True) -> None:
         self._widget.load_file(file_path, show_progress=show_progress)
 
-    def setChip(self, chip: Any) -> None:
-        self._widget.setChip(chip)
+    def setLayoutViewer(self, viewer: Any) -> None:
+        self._widget.setLayoutViewer(viewer)
+
+    def setChip(self, chip: Any, layout_viewer: Any = None) -> None:
+        self._widget.setChip(chip, layout_viewer=layout_viewer)
 
