@@ -19,7 +19,7 @@ from PySide6.QtGui import QAction, QKeySequence, QColor
 from PySide6.QtCore import Qt
 import time
 from rishi.odb.database import dbDatabase
-from rishi.odb.geom import Rect
+from rishi.odb.geom import Rect, Point
 from rishi.lefin import LefParser
 from rishi.defin import DefParser
 from rishi.gui.layoutViewer import LayoutViewer
@@ -829,7 +829,14 @@ class MainWindow(QMainWindow):
         self.load_design_files(sorted_lefs, target_def)
 
     def _on_cursor_moved(self, x_um: float, y_um: float) -> None:
-        self._coords_label.setText(f"X: {x_um:8.3f} µm  Y: {y_um:8.3f} µm")
+        text = f"X: {x_um:8.3f} µm  Y: {y_um:8.3f} µm"
+        if self._viewer.getOptions().showDensityHeatmap() and self._viewer.hasDesign():
+            dbu_per_um = self._viewer._chip.getTech().getDbuPerMicron() if self._viewer._chip and self._viewer._chip.getTech() else 1000
+            pt = Point(int(round(x_um * dbu_per_um)), int(round(y_um * dbu_per_um)))
+            d = self._viewer.getDensityAt(pt)
+            if d is not None:
+                text += f"  |  Density: {d * 100:5.1f}%"
+        self._coords_label.setText(text)
 
     def _show_about(self) -> None:
         QMessageBox.about(

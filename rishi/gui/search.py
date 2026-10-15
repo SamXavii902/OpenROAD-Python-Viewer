@@ -28,6 +28,8 @@ class SpatialSearch:
         # Instance bounding boxes: [x1, y1, x2, y2]
         self._insts: List[dbInst] = []
         self._inst_boxes: Optional[np.ndarray] = None
+        self._inst_is_macro: Optional[np.ndarray] = None
+        self._inst_is_filler: Optional[np.ndarray] = None
 
         # Per-layer routing shapes: [x1, y1, x2, y2, is_via, shape_idx]
         self._route_shapes_by_layer: Dict[str, List[RouteShape]] = {}
@@ -50,7 +52,8 @@ class SpatialSearch:
         self._block = None
         self._insts.clear()
         self._inst_boxes = None
-        self._is_macro = None
+        self._inst_is_macro = None
+        self._inst_is_filler = None
         self._route_shapes_by_layer.clear()
         self._route_boxes_by_layer.clear()
         self._obs_by_layer.clear()
@@ -73,6 +76,7 @@ class SpatialSearch:
         if self._insts:
             boxes = np.empty((n_insts, 4), dtype=np.int32)
             is_macro_list = np.empty(n_insts, dtype=bool)
+            is_filler_list = np.empty(n_insts, dtype=bool)
 
             num_workers = min(16, max(1, os.cpu_count() or 1))
             chunk_size = max(25000, (n_insts + num_workers - 1) // num_workers)
@@ -85,7 +89,9 @@ class SpatialSearch:
                     boxes[i, 1] = b.yMin()
                     boxes[i, 2] = b.xMax()
                     boxes[i, 3] = b.yMax()
-                    is_macro_list[i] = inst.getMaster().isMacro()
+                    m = inst.getMaster()
+                    is_macro_list[i] = m.isMacro()
+                    is_filler_list[i] = m.isFiller()
 
             if n_insts > 30000 and num_workers > 1:
                 with ThreadPoolExecutor(max_workers=num_workers) as pool:
@@ -100,6 +106,7 @@ class SpatialSearch:
 
             self._inst_boxes = boxes
             self._inst_is_macro = is_macro_list
+            self._inst_is_filler = is_filler_list
             self._inst_sizes = np.maximum(
                 self._inst_boxes[:, 2] - self._inst_boxes[:, 0],
                 self._inst_boxes[:, 3] - self._inst_boxes[:, 1],
@@ -107,6 +114,7 @@ class SpatialSearch:
         else:
             self._inst_boxes = np.empty((0, 4), dtype=np.int32)
             self._inst_is_macro = np.empty((0,), dtype=bool)
+            self._inst_is_filler = np.empty((0,), dtype=bool)
             self._inst_sizes = np.empty((0,), dtype=np.int32)
 
         if callback:

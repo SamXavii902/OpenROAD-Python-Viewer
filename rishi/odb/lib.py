@@ -148,6 +148,7 @@ class dbMaster:
         self._poly_obstructions: List[tuple[dbTechLayer, Polygon]] = []
         self._cached_boundary: Optional[Rect] = None
         self._is_macro_cached: Optional[bool] = None
+        self._is_filler_cached: Optional[bool] = None
 
     def getName(self) -> str:
         return self._name
@@ -158,6 +159,7 @@ class dbMaster:
     def setType(self, t: dbMasterType) -> None:
         self._type = t
         self._is_macro_cached = None
+        self._is_filler_cached = None
 
     def getWidth(self) -> int:
         return self._width
@@ -215,6 +217,22 @@ class dbMaster:
         name_l = self._name.lower()
         res = any(k in name_l for k in ("ram", "sram", "rom", "fakeram", "pll", "fifo", "mem"))
         self._is_macro_cached = res
+        return res
+
+    def isFiller(self) -> bool:
+        if self._is_filler_cached is not None:
+            return self._is_filler_cached
+        if self._type in (dbMasterType.CORE_SPACER, dbMasterType.CORE_FEEDTHRU):
+            self._is_filler_cached = True
+            return True
+        name_u = self._name.upper()
+        res = (
+            name_u.startswith("FILL")
+            or "FILLCELL" in name_u
+            or "DECAP" in name_u
+            or name_u.startswith("SHFILL")
+        )
+        self._is_filler_cached = res
         return res
 
     def isCore(self) -> bool:

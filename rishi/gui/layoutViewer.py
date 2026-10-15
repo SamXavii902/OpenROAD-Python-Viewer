@@ -714,37 +714,54 @@ class LayoutViewer(QWidget):
                         break
 
     def _ensure_density_image(self) -> None:
-        """Precomputes high-performance 2D placement density gradient image across placed instances."""
+        """Precomputes high-performance 2D placement density gradient image matching OpenROAD RePlAce/GPL standards."""
         if self._density_image is not None or not self.hasDesign():
             return
         block = self._chip.getBlock()
-        die = block.getDieArea()
-        if die.dx() <= 0 or die.dy() <= 0:
-            die = block.getCoreArea()
-        if die.dx() <= 0 or die.dy() <= 0:
+
+        # 1. OpenROAD standard: Core Area / Placement rows reference
+        core = block.getCoreArea()
+        if core.dx() <= 0 or core.dy() <= 0:
+            rows = block.getRows()
+            if rows:
+                rb = [r.getBBox() for r in rows]
+                core = Rect(
+                    min(b.xMin() for b in rb),
+                    min(b.yMin() for b in rb),
+                    max(b.xMax() for b in rb),
+                    max(b.yMax() for b in rb),
+                )
+            else:
+                core = block.getDieArea()
+        if core.dx() <= 0 or core.dy() <= 0:
             if hasattr(self._search, "_inst_boxes") and self._search._inst_boxes is not None and len(self._search._inst_boxes) > 0:
                 boxes = self._search._inst_boxes
-                die = Rect(int(np.min(boxes[:, 0])), int(np.min(boxes[:, 1])), int(np.max(boxes[:, 2])), int(np.max(boxes[:, 3])))
+                core = Rect(int(np.min(boxes[:, 0])), int(np.min(boxes[:, 1])), int(np.max(boxes[:, 2])), int(np.max(boxes[:, 3])))
             else:
                 return
 
         nx, ny = 120, 120
-        bw = die.dx() / float(nx)
-        bh = die.dy() / float(ny)
+        bw = core.dx() / float(nx)
+        bh = core.dy() / float(ny)
         bin_area = bw * bh
         if bin_area <= 0:
             return
 
         inv_bw = 1.0 / bw
         inv_bh = 1.0 / bh
-        x0 = float(die.xMin())
-        y0 = float(die.yMin())
+        x0 = float(core.xMin())
+        y0 = float(core.yMin())
 
         # Vectorized instance separation via spatial search
         if hasattr(self._search, "_inst_boxes") and self._search._inst_boxes is not None and len(self._search._inst_boxes) > 0:
             inst_boxes = self._search._inst_boxes
             is_macro = self._search._inst_is_macro
-            std_boxes = inst_boxes[~is_macro]
+            is_filler = getattr(self._search, "_inst_is_filler", None)
+            if is_filler is not None and np.any(is_filler):
+                # Isolate active logic cells from non-functional filler cells (OpenROAD placement density standard)
+                std_boxes = inst_boxes[~is_macro & ~is_filler]
+            else:
+                std_boxes = inst_boxes[~is_macro]
             macro_boxes = inst_boxes[is_macro]
         else:
             all_insts = [inst for inst in block.getInsts() if inst.isPlaced()]
@@ -752,16 +769,22 @@ class LayoutViewer(QWidget):
                 return
             boxes = []
             is_m_list = []
+            is_f_list = []
             for inst in all_insts:
                 b = inst.getBBox().getBox()
                 boxes.append([b.xMin(), b.yMin(), b.xMax(), b.yMax()])
                 m = inst.getMaster()
-                nl = m.getName().lower() if m else ""
-                is_m = m and (m.isBlock() or m.isPad() or m.getWidth() > 15000 or m.getHeight() > 15000 or any(k in nl for k in ("ram", "sram", "rom", "fakeram", "pll", "fifo", "mem")))
+                is_m = m.isMacro() if m else False
+                is_f = m.isFiller() if m else False
                 is_m_list.append(is_m)
+                is_f_list.append(is_f)
             inst_boxes = np.array(boxes, dtype=np.int32)
             is_macro = np.array(is_m_list, dtype=bool)
-            std_boxes = inst_boxes[~is_macro]
+            is_filler = np.array(is_f_list, dtype=bool)
+            if np.any(is_filler):
+                std_boxes = inst_boxes[~is_macro & ~is_filler]
+            else:
+                std_boxes = inst_boxes[~is_macro]
             macro_boxes = inst_boxes[is_macro]
 
         # 1. Standard cells: fast vectorized bincount by center coordinates
@@ -793,11 +816,23 @@ class LayoutViewer(QWidget):
                         over_x = max(0.0, min(float(b[2]), bx2) - max(float(b[0]), bx1))
                         macro_grid[iy, ix] += over_x * over_y
 
-        std_dens = std_grid / bin_area
-        macro_dens = np.clip(macro_grid / bin_area, 0.0, 1.0)
+        macro_frac = np.clip(macro_grid / bin_area, 0.0, 1.0)
+        placeable_area = np.maximum(bin_area - macro_grid, 0.0)
+
+        # Standard cell density relative to placeable capacity
+        with np.errstate(divide='ignore', invalid='ignore'):
+            std_dens = np.where(placeable_area > 0.05 * bin_area, std_grid / placeable_area, 0.0)
+
         max_std_d = float(np.max(std_dens)) if std_dens.size > 0 else 0.0
-        ref_max = max(max_std_d, 0.50)
         self._density_max_val = max_std_d
+        self._density_bins = std_dens
+        self._density_macro_bins = macro_frac
+        self._density_nx = nx
+        self._density_ny = ny
+        self._density_bw = bw
+        self._density_bh = bh
+        self._density_x0 = x0
+        self._density_y0 = y0
 
         img = QImage(nx, ny, QImage.Format_ARGB32_Premultiplied)
         img.fill(0)
@@ -805,47 +840,73 @@ class LayoutViewer(QWidget):
         for iy in range(ny):
             py = ny - 1 - iy  # Flip Y: chip +Y is up, QImage +Y is down
             for ix in range(nx):
-                md = macro_dens[iy, ix]
+                mf = macro_frac[iy, ix]
                 sd = std_dens[iy, ix]
 
-                if md > 0.35:
+                if mf >= 0.75:
                     # Macro blockage footprint tile
-                    alpha = int(min(150.0, 60.0 + md * 90.0))
-                    img.setPixelColor(ix, py, QColor(65, 75, 105, alpha))
+                    alpha = int(min(160.0, 70.0 + mf * 80.0))
+                    img.setPixelColor(ix, py, QColor(60, 72, 95, alpha))
                     continue
 
-                if sd <= 0.03:
+                if sd <= 0.02:
                     continue
 
-                ratio = min(sd / ref_max, 1.0)
-                if ratio < 0.25:
-                    f = ratio / 0.25
+                # OpenROAD standard absolute placement density color gradient:
+                # 0.00 - 0.25 ( 0% - 25%): Deep Blue -> Bright Cyan (Sparse)
+                # 0.25 - 0.50 (25% - 50%): Cyan -> Green (Moderate)
+                # 0.50 - 0.75 (50% - 75%): Green -> Yellow (Target ASIC density ~60-70%)
+                # 0.75 - 0.90 (75% - 90%): Yellow -> Orange (High Density)
+                # 0.90 - 1.00 (90% - 100%): Orange -> Hotspot Red
+                # > 1.00 (> 100%): Over-capacity Crimson / Pink
+                if sd < 0.25:
+                    f = sd / 0.25
                     r = int(15 * (1 - f) + 0 * f)
                     g = int(90 * (1 - f) + 220 * f)
                     b = int(230 * (1 - f) + 255 * f)
-                    a = int(90 + 90 * f)
-                elif ratio < 0.50:
-                    f = (ratio - 0.25) / 0.25
+                    a = int(90 + 80 * f)
+                elif sd < 0.50:
+                    f = (sd - 0.25) / 0.25
                     r = int(0 * (1 - f) + 35 * f)
                     g = int(220 * (1 - f) + 235 * f)
                     b = int(255 * (1 - f) + 40 * f)
-                    a = int(180 + 30 * f)
-                elif ratio < 0.75:
-                    f = (ratio - 0.50) / 0.25
+                    a = int(170 + 30 * f)
+                elif sd < 0.75:
+                    f = (sd - 0.50) / 0.25
                     r = int(35 * (1 - f) + 255 * f)
-                    g = int(235 * (1 - f) + 195 * f)
+                    g = int(235 * (1 - f) + 200 * f)
                     b = int(40 * (1 - f) + 0 * f)
-                    a = int(210 + 25 * f)
-                else:
-                    f = (ratio - 0.75) / 0.25
+                    a = int(200 + 25 * f)
+                elif sd <= 1.00:
+                    f = (sd - 0.75) / 0.25
                     r = int(255 * (1 - f) + 240 * f)
-                    g = int(195 * (1 - f) + 25 * f)
+                    g = int(200 * (1 - f) + 25 * f)
                     b = 0
-                    a = 240
+                    a = int(225 + 25 * f)
+                else:
+                    r = 255
+                    g = 20
+                    b = 70
+                    a = 250
                 img.setPixelColor(ix, py, QColor(r, g, b, a))
 
         self._density_image = img
-        self._density_core = die
+        self._density_core = core
+
+    def getDensityAt(self, pt_dbu: Point) -> Optional[float]:
+        """Returns the local placement density (0.0 to 1.0+) at the given DBU point, or None."""
+        if not hasattr(self, "_density_bins") or self._density_bins is None:
+            return None
+        if not hasattr(self, "_density_core") or self._density_core is None:
+            return None
+        core = self._density_core
+        if not core.contains(pt_dbu):
+            return None
+        ix = int((pt_dbu.x - self._density_x0) / self._density_bw)
+        iy = int((pt_dbu.y - self._density_y0) / self._density_bh)
+        if 0 <= ix < self._density_nx and 0 <= iy < self._density_ny:
+            return float(self._density_bins[iy, ix])
+        return None
 
     def _hit_test_instance(self, pt_dbu: Point) -> Optional[object]:
         if self._chip is None or self._chip.getBlock() is None:
