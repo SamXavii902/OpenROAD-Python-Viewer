@@ -143,6 +143,9 @@ class Rect:
             return Rect(0, 0, 0, 0)
         return Rect(xlo, ylo, xhi, yhi)
 
+    def contains(self, pt: Point) -> bool:
+        return self._xlo <= pt.x <= self._xhi and self._ylo <= pt.y <= self._yhi
+
     def merge(self, other: "Rect") -> None:
         if other.area() == 0 and other._xlo == other._xhi and other._ylo == other._yhi:
             return

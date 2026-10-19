@@ -28,6 +28,8 @@ from rishi.gui.legend import LegendDock
 from rishi.gui.inspector import InspectorDock
 from rishi.gui.searchWidget import SearchDock
 from rishi.gui.timingReportWidget import TimingReportDock
+from rishi.gui.irDropWidget import IRDropDock
+from rishi.irdrop.report import IR_DROP_PALETTE
 from rishi.timing.tarpt_parser import TarptParser
 from rishi.gui.theme import apply_dark_theme
 
@@ -92,6 +94,12 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self._timing_dock)
         self._timing_dock.hide()
 
+        self._ir_drop_dock = IRDropDock(self)
+        self._ir_drop_dock.setLayoutViewer(self._viewer)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self._ir_drop_dock)
+        self.tabifyDockWidget(self._timing_dock, self._ir_drop_dock)
+        self._ir_drop_dock.hide()
+
         self._controls.option_toggled.connect(self._on_display_control_option_toggled)
         self._inspector.macro_selected.connect(self._on_macro_selected)
         self._search_dock.object_selected.connect(self._on_search_object_selected)
@@ -103,6 +111,8 @@ class MainWindow(QMainWindow):
         self._timing_dock.path_selected.connect(self._on_timing_path_selected)
         self._timing_dock.paths_highlighted.connect(self._on_timing_paths_highlighted)
         self._timing_dock.paths_cleared.connect(self._viewer.clearTimingPaths)
+        self._ir_drop_dock.instance_selected.connect(self._on_ir_drop_instance_selected)
+        self._ir_drop_dock.map_visibility_changed.connect(self._on_ir_drop_map_visibility_changed)
 
         # Status Bar
         self._status_bar = QStatusBar(self)
@@ -148,6 +158,12 @@ class MainWindow(QMainWindow):
         open_timing_act.setStatusTip("Open Cadence Innovus / Tempus timing report (.tarpt, .btarpt, .rpt)")
         open_timing_act.triggered.connect(self._open_timing_report_dialog)
         file_menu.addAction(open_timing_act)
+
+        open_ir_drop_act = QAction("Open &IR-Drop Report...", self)
+        open_ir_drop_act.setShortcut(QKeySequence("Ctrl+Shift+I"))
+        open_ir_drop_act.setStatusTip("Load a per-cell voltage-drop report for hotspot analysis")
+        open_ir_drop_act.triggered.connect(self._open_ir_drop_report_dialog)
+        file_menu.addAction(open_ir_drop_act)
 
         export_img_act = QAction("&Export Layout Image...", self)
         export_img_act.setShortcut(QKeySequence("Ctrl+Shift+S"))
@@ -204,6 +220,13 @@ class MainWindow(QMainWindow):
         self._heatmap_act.toggled.connect(self._toggle_heatmap)
         view_menu.addAction(self._heatmap_act)
 
+        self._ir_drop_map_act = QAction("IR-Drop Cell Map", self)
+        self._ir_drop_map_act.setCheckable(True)
+        self._ir_drop_map_act.setChecked(False)
+        self._ir_drop_map_act.setStatusTip("Color standard cells by the loaded IR-drop report")
+        self._ir_drop_map_act.toggled.connect(self._ir_drop_dock.get_widget().set_map_visible)
+        view_menu.addAction(self._ir_drop_map_act)
+
         self._flightlines_act = QAction("&Ratsnest Flightlines", self)
         self._flightlines_act.setCheckable(True)
         self._flightlines_act.setChecked(True)
@@ -218,6 +241,7 @@ class MainWindow(QMainWindow):
         docks_menu.addAction(self._inspector.toggleViewAction())
         docks_menu.addAction(self._legend.toggleViewAction())
         docks_menu.addAction(self._timing_dock.toggleViewAction())
+        docks_menu.addAction(self._ir_drop_dock.toggleViewAction())
         docks_menu.addSeparator()
 
         reset_layout_act = QAction("&Reset Dock Layout", self)
@@ -254,6 +278,10 @@ class MainWindow(QMainWindow):
         timing_debugger_act.setStatusTip("Toggle Cadence timing report debugger dock (Ctrl+T)")
         timing_debugger_act.triggered.connect(self._toggle_timing_debugger)
         tools_menu.addAction(timing_debugger_act)
+
+        ir_drop_act = QAction("IR-Drop Analysis...", self)
+        ir_drop_act.triggered.connect(self._toggle_ir_drop_dock)
+        tools_menu.addAction(ir_drop_act)
 
         find_act = QAction("&Find Object...", self)
         find_act.setShortcut(QKeySequence("Ctrl+F"))
@@ -836,6 +864,14 @@ class MainWindow(QMainWindow):
             d = self._viewer.getDensityAt(pt)
             if d is not None:
                 text += f"  |  Density: {d * 100:5.1f}%"
+        if self._viewer.isIRDropMapVisible() and self._viewer.hasDesign():
+            dbu_per_um = self._viewer._chip.getTech().getDbuPerMicron() if self._viewer._chip and self._viewer._chip.getTech() else 1000
+            pt = Point(int(round(x_um * dbu_per_um)), int(round(y_um * dbu_per_um)))
+            ir_info = self._viewer.getIRDropAt(pt)
+            if ir_info is not None:
+                drop_mv, inst_name = ir_info
+                inst_str = f" ({inst_name})" if inst_name else ""
+                text += f"  |  ⚡ IR Drop: {drop_mv:.1f} mV{inst_str}"
         self._coords_label.setText(text)
 
     def _show_about(self) -> None:
@@ -912,6 +948,13 @@ class MainWindow(QMainWindow):
         state_str = "Enabled" if checked else "Disabled"
         self._status_bar.showMessage(f"Placement Density Heatmap {state_str}", 2500)
 
+    def _on_ir_drop_map_visibility_changed(self, checked: bool) -> None:
+        self._ir_drop_map_act.blockSignals(True)
+        self._ir_drop_map_act.setChecked(checked)
+        self._ir_drop_map_act.blockSignals(False)
+        self._viewer.setIRDropMapVisible(checked)
+        self._status_bar.showMessage(f"IR-Drop Cell Map {'Enabled' if checked else 'Disabled'}", 2500)
+
     def _toggle_flightlines(self, checked: bool) -> None:
         """Toggles connectivity ratsnest flightlines."""
         self._viewer.getOptions().setShowFlightlines(checked)
@@ -975,6 +1018,13 @@ class MainWindow(QMainWindow):
             self._timing_dock.show()
             self._timing_dock.raise_()
 
+    def _toggle_ir_drop_dock(self) -> None:
+        if self._ir_drop_dock.isVisible():
+            self._ir_drop_dock.hide()
+        else:
+            self._ir_drop_dock.show()
+            self._ir_drop_dock.raise_()
+
     def _open_timing_report_dialog(self) -> None:
         """Opens file dialog to select and display a Cadence timing report."""
         filepath, _ = QFileDialog.getOpenFileName(
@@ -988,6 +1038,60 @@ class MainWindow(QMainWindow):
             self._timing_dock.raise_()
             self._timing_dock.load_file(filepath)
             self._status_bar.showMessage(f"Loaded timing report: {os.path.basename(filepath)}", 4000)
+
+    def _open_ir_drop_report_dialog(self) -> None:
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open IR-Drop Report",
+            "",
+            "IR-Drop Reports (*.rpt *.ir *.txt);;All Files (*.*)",
+        )
+        if filepath:
+            self._ir_drop_dock.show()
+            self._ir_drop_dock.raise_()
+            self._ir_drop_dock.load_file(filepath)
+
+    def _on_ir_drop_instance_selected(self, instance_name: str) -> None:
+        if not self._viewer.hasDesign():
+            self._status_bar.showMessage("Load a DEF design to navigate to an IR-drop hotspot", 4000)
+            return
+        block = self._viewer.getChip().getBlock()
+        inst = block.findInst(instance_name)
+        if inst is None:
+            self._viewer._ensure_alias_maps()
+            leaf = instance_name.rsplit("/", 1)[-1]
+            matches = self._viewer._leaf_map.get(leaf, []) if self._viewer._leaf_map else []
+            if len(matches) == 1:
+                inst = matches[0]
+        if inst is None:
+            self._status_bar.showMessage(f"No DEF instance matches {instance_name}", 5000)
+            return
+        box = inst.getBBox().getBox()
+        self._viewer.zoomTo(box, animate=self._viewer.isVisible())
+        self._viewer.selectInstance(inst)
+        self._inspector.inspect_instance(inst)
+
+        # Highlight cell with its exact IR-drop bin color and ping
+        report = getattr(self._viewer, "_ir_drop_data", None)
+        rec = report.records_by_instance.get(inst.getName()) if report else None
+        if rec is None and report:
+            leaf = inst.getName().rsplit("/", 1)[-1]
+            rec = report.records_by_instance.get(leaf)
+
+        if rec is not None and report:
+            drop_mv, cell_type = rec
+            color_idx = report.color_index(drop_mv)
+            bin_color = QColor(IR_DROP_PALETTE[color_idx])
+            self._viewer.highlightObject(box, label=f"⚡ {inst.getName()} ({drop_mv:.1f} mV)", color=bin_color)
+            self._viewer.pingLocation(box.center(), color=bin_color)
+            self._status_bar.showMessage(
+                f"⚡ IR-Drop Hotspot: {inst.getName()} | Drop: {drop_mv:.2f} mV | Cell: {cell_type} | Range: Bin {color_idx + 1}/5",
+                6000,
+            )
+        else:
+            self._viewer.highlightObject(box, label=f"⚡ {inst.getName()}")
+            self._viewer.pingLocation(box.center(), color=QColor("#D8588A"))
+            self._status_bar.showMessage(f"IR-drop hotspot: {inst.getName()}", 5000)
 
     def _on_timing_path_selected(self, path: Any, zoom: bool) -> None:
         """Highlights selected timing path on chip layout canvas and optionally zooms."""
@@ -1004,6 +1108,8 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, self._inspector)
         self.addDockWidget(Qt.RightDockWidgetArea, self._legend)
         self.addDockWidget(Qt.BottomDockWidgetArea, self._timing_dock)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self._ir_drop_dock)
+        self.tabifyDockWidget(self._timing_dock, self._ir_drop_dock)
         self.tabifyDockWidget(self._search_dock, self._inspector)
         self.tabifyDockWidget(self._inspector, self._legend)
         self._controls.setFloating(False)
@@ -1011,6 +1117,7 @@ class MainWindow(QMainWindow):
         self._inspector.setFloating(False)
         self._legend.setFloating(False)
         self._timing_dock.setFloating(False)
+        self._ir_drop_dock.setFloating(False)
         self._controls.show()
         self._search_dock.show()
         self._inspector.show()
@@ -1028,6 +1135,7 @@ class MainWindow(QMainWindow):
         self._inspector.setFeatures(features)
         self._legend.setFeatures(features)
         self._timing_dock.setFeatures(features)
+        self._ir_drop_dock.setFeatures(features)
         state_str = "locked" if locked else "unlocked (movable & floatable)"
         self._status_bar.showMessage(f"Docks {state_str}", 3000)
 
@@ -1042,6 +1150,9 @@ class MainWindow(QMainWindow):
         # 2. Reset Docks
         if hasattr(self, "_timing_dock") and self._timing_dock is not None:
             self._timing_dock.clear()
+
+        if hasattr(self, "_ir_drop_dock") and self._ir_drop_dock is not None:
+            self._ir_drop_dock.clear()
 
         if hasattr(self, "_search_dock") and self._search_dock is not None:
             self._search_dock.clear()
@@ -1068,6 +1179,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Safely terminates background rendering threads when window closes."""
+        if hasattr(self, "_ir_drop_dock") and self._ir_drop_dock is not None:
+            self._ir_drop_dock.get_widget().stop_loading()
         if hasattr(self, "_viewer") and self._viewer is not None:
             if hasattr(self._viewer, "_render_thread") and self._viewer._render_thread is not None:
                 self._viewer._render_thread.exit_thread()

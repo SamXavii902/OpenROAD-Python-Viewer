@@ -1,11 +1,13 @@
 """Tests for MainWindow timing dock integration."""
 
 import os
+from unittest.mock import MagicMock, patch
 import pytest
 from PySide6.QtWidgets import QApplication
 
 from rishi.gui.mainWindow import MainWindow
 from rishi.timing.tarpt_parser import TimingPath
+from rishi.odb.geom import Rect
 
 TARPT_PATH = r"C:\High-Speed-LLM-using-RAG\data\ActualLogFiles\route_reg2reg.tarpt"
 
@@ -27,6 +29,18 @@ def test_mainwindow_timing_dock_integration(qapp):
     # Timing dock exists
     assert hasattr(win, "_timing_dock")
     assert win._timing_dock is not None
+    assert hasattr(win, "_ir_drop_dock")
+    assert not win._ir_drop_dock.isVisible()
+
+    win._toggle_ir_drop_dock()
+    assert win._ir_drop_dock.isVisible()
+    win._toggle_ir_drop_dock()
+    assert not win._ir_drop_dock.isVisible()
+
+    win._ir_drop_dock.get_widget().set_map_visible(True)
+    assert win._ir_drop_map_act.isChecked()
+    win._ir_drop_dock.get_widget().set_map_visible(False)
+    assert not win._ir_drop_map_act.isChecked()
 
     # Toggle debugger method
     assert not win._timing_dock.isVisible()
@@ -64,4 +78,30 @@ Timing Path:
     assert win._viewer._active_timing_path == p
 
     # Clean up
+    win.close()
+
+
+def test_ir_drop_hotspot_uses_animated_layout_navigation(qapp):
+    win = MainWindow()
+    win.show()
+    box = Rect(100, 200, 300, 500)
+    instance = MagicMock()
+    instance.getBBox.return_value.getBox.return_value = box
+    block = MagicMock()
+    block.findInst.return_value = instance
+    chip = MagicMock()
+    chip.getBlock.return_value = block
+
+    with (
+        patch.object(win._viewer, "hasDesign", return_value=True),
+        patch.object(win._viewer, "getChip", return_value=chip),
+        patch.object(win._viewer, "zoomTo") as zoom_to,
+        patch.object(win._viewer, "selectInstance") as select_instance,
+        patch.object(win._inspector, "inspect_instance") as inspect_instance,
+    ):
+        win._on_ir_drop_instance_selected("top/u_hotspot")
+
+    zoom_to.assert_called_once_with(box, animate=True)
+    select_instance.assert_called_once_with(instance)
+    inspect_instance.assert_called_once_with(instance)
     win.close()

@@ -1,6 +1,6 @@
 """RenderThread ported from RISHI gui/src/renderThread.cpp."""
 
-from typing import List, Dict, Tuple, Optional
+from typing import TYPE_CHECKING, List, Dict, Tuple, Optional
 from PySide6.QtCore import QThread, Signal, QMutex, QWaitCondition, QRect, QRectF, QPoint, QPointF, Qt
 from PySide6.QtGui import (
     QImage,
@@ -27,6 +27,10 @@ from rishi.odb.lib import dbMaster
 from rishi.odb.block import dbBlock, dbInst, dbRow
 from rishi.gui.options import DisplayOptions
 from rishi.gui.painter import GuiPainter
+from rishi.irdrop.report import IR_DROP_PALETTE
+
+if TYPE_CHECKING:
+    from rishi.gui.layoutViewer import LayoutViewer
 
 
 class RenderThread(QThread):
@@ -202,7 +206,8 @@ class RenderThread(QThread):
             return
 
         # 2. Query visible instances (L1210-1230)
-        inst_limit = self._viewer.instanceSizeLimit()
+        ir_drop_active = self._viewer._ir_drop_map_visible and self._viewer._ir_drop_data is not None
+        inst_limit = 0 if ir_drop_active else self._viewer.instanceSizeLimit()
         insts = search.searchInsts(
             block,
             bounds.xMin(),
@@ -238,6 +243,9 @@ class RenderThread(QThread):
                     return
                 self.drawLayer(painter, block, layer, insts, bounds, gui_painter)
 
+        if self._viewer._ir_drop_map_visible and self._viewer._ir_drop_data is not None:
+            self.drawIRDropOverlay(painter, insts)
+
         if self._restart:
             return
 
@@ -255,6 +263,42 @@ class RenderThread(QThread):
         # 9. Draw IO pins (L1233)
         if options.areIOPinsVisible():
             self.drawIOPins(painter, block, bounds)
+
+    def drawIRDropOverlay(self, painter: QPainter, insts: List[dbInst]) -> None:
+        """Draws a distinct translucent IR-drop range color over standard-cell footprints."""
+        report = self._viewer._ir_drop_data
+        records = report.records_by_instance
+        brushes = []
+        pens = []
+        for color_hex in IR_DROP_PALETTE:
+            color = QColor(color_hex)
+            pens.append(QPen(color.lighter(125), 1))
+            color.setAlpha(175)
+            brushes.append(QBrush(color))
+
+        leaf_map = getattr(self._viewer, "_leaf_map", None)
+
+        painter.save()
+        for index, inst in enumerate(insts):
+            if index % 2000 == 0 and self._restart:
+                break
+            if inst.getMaster().isMacro():
+                continue
+            name = inst.getName()
+            record = records.get(name)
+            if record is None and leaf_map:
+                leaf = name.rsplit("/", 1)[-1]
+                record = records.get(leaf)
+            if record is None:
+                continue
+            box = inst.getBBox().getBox()
+            if box.area() <= 0:
+                continue
+            idx = report.color_index(record[0])
+            painter.setPen(pens[idx])
+            painter.setBrush(brushes[idx])
+            painter.drawRect(box.xMin(), box.yMin(), box.dx(), box.dy())
+        painter.restore()
 
     def drawBoundaries(self, painter: QPainter, block: dbBlock) -> None:
         options = self._viewer.getOptions()

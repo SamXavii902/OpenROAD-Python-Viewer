@@ -26,6 +26,7 @@ from rishi.odb.database import dbChip
 from rishi.gui.options import DisplayOptions
 from rishi.gui.search import SpatialSearch
 from rishi.gui.renderThread import RenderThread
+from rishi.irdrop.report import IR_DROP_PALETTE
 
 
 kZoomScaleFactor = 1.25
@@ -98,6 +99,18 @@ class LayoutViewer(QWidget):
         self._leaf_map: Optional[Dict[str, List[Any]]] = None
         self._timing_report_data: Optional[Any] = None
         self._timing_connectivity: Dict[str, List[Point]] = {}
+        self._ir_drop_data: Optional[Any] = None
+        self._ir_drop_map_visible: bool = False
+        self._ir_drop_heatmap_image: Optional[QImage] = None
+        self._ir_drop_heatmap_core: Optional[Rect] = None
+        self._ir_drop_grid_drop: Optional[np.ndarray] = None
+        self._ir_drop_grid_inst: Optional[np.ndarray] = None
+        self._ir_drop_nx: int = 120
+        self._ir_drop_ny: int = 120
+        self._ir_drop_x0: float = 0.0
+        self._ir_drop_y0: float = 0.0
+        self._ir_drop_bw: float = 0.0
+        self._ir_drop_bh: float = 0.0
 
         # 60 FPS Vector Animation Overlay Engine
         self._anim_timer = QTimer(self)
@@ -159,6 +172,9 @@ class LayoutViewer(QWidget):
         self._density_image = None
         self._density_core = None
         self._density_max_val = 0.85
+        self._ir_drop_heatmap_image = None
+        self._ir_drop_heatmap_core = None
+        self._ir_drop_grid_drop = None
         if chip and chip.getTech():
             self._options.tech_init(chip.getTech())
         if chip and chip.getBlock():
@@ -335,23 +351,30 @@ class LayoutViewer(QWidget):
         self._gliding = True
         self._check_start_anim()
 
-    def highlightObjects(self, items: List[Tuple[Rect, str]], zoom: bool = False) -> None:
+    def highlightObjects(self, items: List[Any], zoom: bool = False) -> None:
         """Highlights multiple objects simultaneously with corner reticles."""
         self._highlight_items = list(items)
         if items and zoom:
-            xmin = min(r.xMin() for r, _ in items)
-            ymin = min(r.yMin() for r, _ in items)
-            xmax = max(r.xMax() for r, _ in items)
-            ymax = max(r.yMax() for r, _ in items)
+            xmin = min(item[0].xMin() for item in items)
+            ymin = min(item[0].yMin() for item in items)
+            xmax = max(item[0].xMax() for item in items)
+            ymax = max(item[0].yMax() for item in items)
             self.zoomTo(Rect(xmin, ymin, xmax, ymax), animate=self.isVisible())
         self.update()
 
-    def highlightObject(self, rect: Optional[Rect], label: str = "", zoom: bool = False) -> None:
+    def highlightObject(
+        self,
+        rect: Optional[Rect],
+        label: str = "",
+        zoom: bool = False,
+        color: Optional[QColor] = None,
+    ) -> None:
         """Highlights a specific object with a glowing target bracket reticle."""
         if rect is None:
             self.highlightObjects([], zoom=False)
         else:
-            self.highlightObjects([(rect, label)], zoom=zoom)
+            item = (rect, label, color) if color is not None else (rect, label)
+            self.highlightObjects([item], zoom=zoom)
 
     def pingLocation(self, pt: Point, color: QColor = QColor(0, 229, 255)) -> None:
         """Triggers an expanding radar sonar ripple at the specified DBU coordinate."""
@@ -541,6 +564,21 @@ class LayoutViewer(QWidget):
                         _, pt_next = names[i + 1]
                         self._timing_connectivity.setdefault(inst_n, []).append(pt_next)
                         self._timing_connectivity.setdefault(leaf_n, []).append(pt_next)
+
+    def setIRDropData(self, report_data: Optional[Any]) -> None:
+        self._ir_drop_data = report_data
+        self._ir_drop_heatmap_image = None
+        self._ir_drop_heatmap_core = None
+        self._ir_drop_grid_drop = None
+        self._ir_drop_grid_inst = None
+        self.fullRepaint()
+
+    def setIRDropMapVisible(self, visible: bool) -> None:
+        self._ir_drop_map_visible = bool(visible)
+        self.fullRepaint()
+
+    def isIRDropMapVisible(self) -> bool:
+        return self._ir_drop_map_visible and self._ir_drop_data is not None
 
     def _resolve_timing_path_points(self, path: Any) -> List[Point]:
         """Resolves ordered physical DBU points along the timing path with 2-tier caching."""
@@ -908,6 +946,271 @@ class LayoutViewer(QWidget):
             return float(self._density_bins[iy, ix])
         return None
 
+    def _ensure_ir_drop_heatmap(self) -> None:
+        """Precomputes 2D spatial voltage-drop thermal contour image matching EDA industry standards."""
+        if self._ir_drop_heatmap_image is not None or not self.hasDesign() or self._ir_drop_data is None:
+            return
+        block = self._chip.getBlock()
+        report = self._ir_drop_data
+        records = getattr(report, "records_by_instance", None)
+        if not records:
+            return
+
+        core = block.getCoreArea()
+        if core.dx() <= 0 or core.dy() <= 0:
+            rows = block.getRows()
+            if rows:
+                rb = [r.getBBox() for r in rows]
+                core = Rect(
+                    min(b.xMin() for b in rb),
+                    min(b.yMin() for b in rb),
+                    max(b.xMax() for b in rb),
+                    max(b.yMax() for b in rb),
+                )
+            else:
+                core = block.getDieArea()
+        if core.dx() <= 0 or core.dy() <= 0:
+            return
+
+        nx, ny = 120, 120
+        bw = core.dx() / float(nx)
+        bh = core.dy() / float(ny)
+        if bw <= 0 or bh <= 0:
+            return
+
+        inv_bw = 1.0 / bw
+        inv_bh = 1.0 / bh
+        x0 = float(core.xMin())
+        y0 = float(core.yMin())
+
+        grid_drop = np.zeros((ny, nx), dtype=np.float32)
+        grid_count = np.zeros((ny, nx), dtype=np.int32)
+        grid_inst = np.empty((ny, nx), dtype=object)
+
+        self._ensure_alias_maps()
+
+        # Map instances to spatial grid bins
+        if hasattr(self._search, "_inst_boxes") and self._search._inst_boxes is not None and len(self._search._inst_boxes) > 0:
+            boxes = self._search._inst_boxes
+            insts = self._search._insts
+            for i in range(len(insts)):
+                inst = insts[i]
+                name = inst.getName()
+                rec = records.get(name)
+                if rec is None and self._leaf_map:
+                    leaf = name.rsplit("/", 1)[-1]
+                    rec = records.get(leaf)
+                if rec is None:
+                    continue
+                drop_mv = rec[0]
+                cx = (boxes[i, 0] + boxes[i, 2]) * 0.5
+                cy = (boxes[i, 1] + boxes[i, 3]) * 0.5
+                ix = int((cx - x0) * inv_bw)
+                iy = int((cy - y0) * inv_bh)
+                if 0 <= ix < nx and 0 <= iy < ny:
+                    if drop_mv > grid_drop[iy, ix]:
+                        grid_drop[iy, ix] = drop_mv
+                        grid_inst[iy, ix] = name
+                    grid_count[iy, ix] += 1
+        else:
+            for inst in block.getInsts():
+                if not inst.isPlaced():
+                    continue
+                name = inst.getName()
+                rec = records.get(name)
+                if rec is None and self._leaf_map:
+                    leaf = name.rsplit("/", 1)[-1]
+                    rec = records.get(leaf)
+                if rec is None:
+                    continue
+                drop_mv = rec[0]
+                c = inst.getBBox().getBox().center()
+                ix = int((c.x - x0) * inv_bw)
+                iy = int((c.y - y0) * inv_bh)
+                if 0 <= ix < nx and 0 <= iy < ny:
+                    if drop_mv > grid_drop[iy, ix]:
+                        grid_drop[iy, ix] = drop_mv
+                        grid_inst[iy, ix] = name
+                    grid_count[iy, ix] += 1
+
+        if not np.any(grid_count > 0):
+            return
+
+        # Continuous thermal smoothing using gaussian filter (or fallback box filter)
+        try:
+            from scipy.ndimage import gaussian_filter
+            smoothed = gaussian_filter(grid_drop, sigma=1.2)
+        except Exception:
+            smoothed = grid_drop.copy()
+
+        min_mv = float(report.minimum_mv)
+        max_mv = float(report.maximum_mv)
+        span_mv = max(max_mv - min_mv, 0.1)
+
+        img = QImage(nx, ny, QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+
+        # 5 palette anchor stops
+        palette_colors = [QColor(c) for c in IR_DROP_PALETTE]
+
+        for iy in range(ny):
+            py = ny - 1 - iy  # Flip layout Y to screen image Y
+            for ix in range(nx):
+                val = smoothed[iy, ix]
+                if grid_count[iy, ix] == 0 and val < min_mv:
+                    continue
+
+                frac = min(max((val - min_mv) / span_mv, 0.0), 1.0)
+                # Map frac across the 5 palette colors
+                n_pal = len(palette_colors)
+                scaled_f = frac * (n_pal - 1)
+                idx0 = int(scaled_f)
+                idx1 = min(idx0 + 1, n_pal - 1)
+                t = scaled_f - idx0
+
+                c0 = palette_colors[idx0]
+                c1 = palette_colors[idx1]
+
+                r = int(c0.red() * (1 - t) + c1.red() * t)
+                g = int(c0.green() * (1 - t) + c1.green() * t)
+                b = int(c0.blue() * (1 - t) + c1.blue() * t)
+                a = int(140 + 85 * frac) if grid_count[iy, ix] > 0 else int(90 * frac)
+
+                img.setPixelColor(ix, py, QColor(r, g, b, a))
+
+        self._ir_drop_heatmap_image = img
+        self._ir_drop_heatmap_core = core
+        self._ir_drop_grid_drop = grid_drop
+        self._ir_drop_grid_smoothed = smoothed
+        self._ir_drop_grid_inst = grid_inst
+        self._ir_drop_nx = nx
+        self._ir_drop_ny = ny
+        self._ir_drop_x0 = x0
+        self._ir_drop_y0 = y0
+        self._ir_drop_bw = bw
+        self._ir_drop_bh = bh
+        self._ir_drop_inv_bw = inv_bw
+        self._ir_drop_inv_bh = inv_bh
+
+    def _draw_ir_drop_heatmap(self, painter: QPainter) -> None:
+        """Renders continuous 2D voltage-drop heatmap and HUD legend card."""
+        if not self._ir_drop_map_visible or self._ir_drop_data is None or not self.hasDesign():
+            return
+        if self._ir_drop_heatmap_image is None:
+            self._ensure_ir_drop_heatmap()
+        if self._ir_drop_heatmap_image is None or self._ir_drop_heatmap_core is None:
+            return
+
+        painter.save()
+        p1 = self.dbuPointToScreen(Point(self._ir_drop_heatmap_core.xMin(), self._ir_drop_heatmap_core.yMax()))
+        p2 = self.dbuPointToScreen(Point(self._ir_drop_heatmap_core.xMax(), self._ir_drop_heatmap_core.yMin()))
+        w = p2.x() - p1.x()
+        h = p2.y() - p1.y()
+        if w > 1 and h > 1:
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            painter.drawImage(QRectF(p1.x(), p1.y(), w, h), self._ir_drop_heatmap_image)
+
+        self._draw_ir_drop_hud_legend(painter)
+        painter.restore()
+
+    def _draw_ir_drop_hud_legend(self, painter: QPainter) -> None:
+        """Renders sleek EDA IR-drop spectrum gradient bar and statistics HUD card."""
+        if self._ir_drop_data is None:
+            return
+        report = self._ir_drop_data
+
+        card_w = 280
+        card_h = 60
+        margin_r = 20
+        margin_t = 20
+        if self._options.showDensityHeatmap():
+            margin_t += 68
+
+        x = self.width() - card_w - margin_r
+        y = margin_t
+
+        # Translucent dark HUD card background
+        painter.setBrush(QColor(15, 20, 28, 235))
+        painter.setPen(QPen(QColor(60, 72, 90), 1))
+        painter.drawRoundedRect(QRectF(x, y, card_w, card_h), 6, 6)
+
+        # Title & Stats
+        title_font = QFont("Segoe UI", 8, QFont.Bold)
+        painter.setFont(title_font)
+        painter.setPen(QColor(230, 235, 245))
+        painter.drawText(x + 10, y + 16, "⚡ IR-Drop Heatmap")
+
+        stat_font = QFont("Segoe UI", 7, QFont.Normal)
+        painter.setFont(stat_font)
+        painter.setPen(QColor(255, 110, 110))
+        worst_str = f"Worst: {report.maximum_mv:.1f} mV"
+        painter.drawText(x + card_w - 95, y + 16, worst_str)
+
+        # Continuous IR-Drop Palette Gradient Bar
+        bar_x = x + 10
+        bar_y = y + 23
+        bar_w = card_w - 20
+        bar_h = 10
+
+        grad = QLinearGradient(bar_x, bar_y, bar_x + bar_w, bar_y)
+        grad.setColorAt(0.00, QColor("#39B7A5"))
+        grad.setColorAt(0.25, QColor("#419BC4"))
+        grad.setColorAt(0.50, QColor("#5E7DCE"))
+        grad.setColorAt(0.75, QColor("#8B68C6"))
+        grad.setColorAt(1.00, QColor("#D8588A"))
+
+        painter.setPen(QPen(QColor(40, 50, 65), 1))
+        painter.setBrush(grad)
+        painter.drawRect(QRectF(bar_x, bar_y, bar_w, bar_h))
+
+        # Tick Labels
+        tick_font = QFont("Segoe UI", 7)
+        painter.setFont(tick_font)
+        painter.setPen(QColor(170, 180, 195))
+        min_str = f"{report.minimum_mv:.1f}"
+        p95_str = f"P95: {report.percentile_95_mv:.1f}"
+        max_str = f"{report.maximum_mv:.1f} mV"
+        painter.drawText(bar_x, bar_y + bar_h + 13, min_str)
+        painter.drawText(bar_x + int(bar_w * 0.45) - 15, bar_y + bar_h + 13, p95_str)
+        painter.drawText(bar_x + bar_w - 45, bar_y + bar_h + 13, max_str)
+
+    def getIRDropAt(self, pt_dbu: Point) -> Optional[Tuple[float, str]]:
+        """Returns the local IR drop in mV and instance name at the given DBU point, or None."""
+        if self._ir_drop_data is None:
+            return None
+        if getattr(self, "_ir_drop_grid_drop", None) is None:
+            self._ensure_ir_drop_heatmap()
+
+        # First check if directly hitting a placed instance
+        inst = self._hit_test_instance(pt_dbu)
+        if inst is not None:
+            rec = self._ir_drop_data.records_by_instance.get(inst.getName())
+            if rec is None and self._leaf_map:
+                leaf = inst.getName().rsplit("/", 1)[-1]
+                rec = self._ir_drop_data.records_by_instance.get(leaf)
+            if rec is not None:
+                return (rec[0], inst.getName())
+
+        # Fallback to spatial grid
+        if (
+            hasattr(self, "_ir_drop_grid_drop")
+            and self._ir_drop_grid_drop is not None
+            and self._ir_drop_heatmap_core is not None
+        ):
+            if self._ir_drop_heatmap_core.contains(pt_dbu):
+                inv_bw = getattr(self, "_ir_drop_inv_bw", 1.0 / self._ir_drop_bw)
+                inv_bh = getattr(self, "_ir_drop_inv_bh", 1.0 / self._ir_drop_bh)
+                ix = int((pt_dbu.x - self._ir_drop_x0) * inv_bw)
+                iy = int((pt_dbu.y - self._ir_drop_y0) * inv_bh)
+                if 0 <= ix < self._ir_drop_nx and 0 <= iy < self._ir_drop_ny:
+                    drop = float(self._ir_drop_grid_drop[iy, ix])
+                    inst_n = self._ir_drop_grid_inst[iy, ix] or ""
+                    if drop <= 0 and hasattr(self, "_ir_drop_grid_smoothed") and self._ir_drop_grid_smoothed is not None:
+                        drop = float(self._ir_drop_grid_smoothed[iy, ix])
+                    if drop > 0:
+                        return (drop, inst_n)
+        return None
+
     def _hit_test_instance(self, pt_dbu: Point) -> Optional[object]:
         if self._chip is None or self._chip.getBlock() is None:
             return None
@@ -1007,6 +1310,10 @@ class LayoutViewer(QWidget):
             # Placement Density Heatmap overlay
             if self._options.showDensityHeatmap():
                 self._draw_density_heatmap(painter)
+
+            # IR-Drop Heatmap overlay
+            if self._ir_drop_map_visible and self._ir_drop_data is not None:
+                self._draw_ir_drop_heatmap(painter)
 
             # Sonar radar ripples overlay
             if self._sonar_rings:
@@ -1420,7 +1727,11 @@ class LayoutViewer(QWidget):
         p_bold = QPen(QColor("#FFE600"), 3)
         p_bold.setCosmetic(True)
 
-        for rect, label in self._highlight_items:
+        for item in self._highlight_items:
+            rect = item[0]
+            label = item[1] if len(item) > 1 else ""
+            custom_color = item[2] if len(item) > 2 else None
+
             p_min = self.dbuPointToScreen(Point(rect.xMin(), rect.yMin()))
             p_max = self.dbuPointToScreen(Point(rect.xMax(), rect.yMax()))
 
@@ -1430,8 +1741,11 @@ class LayoutViewer(QWidget):
             height = max(abs(p_max.y() - p_min.y()), 16.0)
             screen_box = QRectF(left, top, width, height)
 
-            painter.setPen(QPen(cyan, 2))
-            painter.setBrush(QColor(0, 229, 255, 30))
+            draw_col = custom_color if custom_color is not None else cyan
+            fill_col = QColor(draw_col.red(), draw_col.green(), draw_col.blue(), 45)
+
+            painter.setPen(QPen(draw_col, 2))
+            painter.setBrush(fill_col)
             painter.drawRect(screen_box)
 
             # Bold corner reticle brackets
@@ -1441,7 +1755,9 @@ class LayoutViewer(QWidget):
             bw = screen_box.width()
             bh = screen_box.height()
 
-            painter.setPen(p_bold)
+            reticle_pen = QPen(draw_col.lighter(130), 3) if custom_color is not None else p_bold
+            reticle_pen.setCosmetic(True)
+            painter.setPen(reticle_pen)
             painter.drawLine(QPointF(bx, by), QPointF(bx + b_len, by))
             painter.drawLine(QPointF(bx, by), QPointF(bx, by + b_len))
             painter.drawLine(QPointF(bx + bw, by), QPointF(bx + bw - b_len, by))
@@ -1458,8 +1774,8 @@ class LayoutViewer(QWidget):
                 th = fm.height() + 6
                 badge_rect = QRectF(bx + bw / 2.0 - tw / 2.0, by - th - 6, tw, th)
 
-                painter.setPen(QPen(cyan, 1))
-                painter.setBrush(QColor(15, 20, 30, 230))
+                painter.setPen(QPen(draw_col, 1.5))
+                painter.setBrush(QColor(15, 20, 30, 235))
                 painter.drawRoundedRect(badge_rect, 4, 4)
 
                 painter.setPen(QColor("#FFFFFF"))
