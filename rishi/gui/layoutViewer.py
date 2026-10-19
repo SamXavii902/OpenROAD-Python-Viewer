@@ -113,6 +113,8 @@ class LayoutViewer(QWidget):
         self._ir_drop_bh: float = 0.0
         self._ir_drop_heatmap_attempted: bool = False
         self._instance_resolve_cache: Dict[str, Any] = {}
+        self._ir_drop_name_to_bin: Dict[str, int] = {}
+        self._ir_drop_leaf_to_bin: Dict[str, int] = {}
 
         # 60 FPS Vector Animation Overlay Engine
         self._anim_timer = QTimer(self)
@@ -184,6 +186,7 @@ class LayoutViewer(QWidget):
         if chip and chip.getBlock():
             self._search.build(chip.getBlock(), callback=progress_callback)
             self._ensure_alias_maps()
+            self._build_ir_drop_color_cache()
             self.fit()
         else:
             self.centering_shift = QPoint(0, 0)
@@ -577,11 +580,16 @@ class LayoutViewer(QWidget):
         self._ir_drop_grid_inst = None
         self._ir_drop_heatmap_attempted = False
         self._instance_resolve_cache = {}
+        self._build_ir_drop_color_cache()
         self.fullRepaint()
+        self.update()
 
     def setIRDropMapVisible(self, visible: bool) -> None:
         self._ir_drop_map_visible = bool(visible)
+        if visible and self._ir_drop_data is not None:
+            self._build_ir_drop_color_cache()
         self.fullRepaint()
+        self.update()
 
     def isIRDropMapVisible(self) -> bool:
         return self._ir_drop_map_visible and self._ir_drop_data is not None
@@ -708,6 +716,91 @@ class LayoutViewer(QWidget):
                 if parent in c.getName():
                     return c
         return candidates[0]
+
+    def _build_ir_drop_color_cache(self) -> None:
+        """Precomputes fast O(1) instance-name to IR-drop bin mapping for high-speed cell rendering."""
+        if self._ir_drop_data is None:
+            self._ir_drop_name_to_bin = {}
+            self._ir_drop_leaf_to_bin = {}
+            return
+
+        report = self._ir_drop_data
+        records = getattr(report, "records_by_instance", {})
+        if not records:
+            self._ir_drop_name_to_bin = {}
+            self._ir_drop_leaf_to_bin = {}
+            return
+
+        name_to_bin: Dict[str, int] = {}
+        leaf_to_bin: Dict[str, int] = {}
+
+        # 1. Map report instances and common variations
+        for inst_name, rec in records.items():
+            drop_mv = rec[0]
+            bin_idx = report.color_index(drop_mv)
+
+            name_to_bin[inst_name] = bin_idx
+
+            # Escaped bracket variants
+            if "[" in inst_name and r"\[" not in inst_name:
+                esc = inst_name.replace("[", r"\[").replace("]", r"\]")
+                name_to_bin[esc] = bin_idx
+            elif r"\[" in inst_name:
+                unesc = inst_name.replace(r"\[", "[").replace(r"\]", "]")
+                name_to_bin[unesc] = bin_idx
+
+            # Hierarchical dot to slash
+            if "." in inst_name and "/" not in inst_name:
+                slash_name = inst_name.replace(".", "/")
+                name_to_bin[slash_name] = bin_idx
+                if "[" in slash_name:
+                    name_to_bin[slash_name.replace("[", r"\[").replace("]", r"\]")] = bin_idx
+
+            # Top-level prefix stripped variant (strip first component)
+            if "/" in inst_name:
+                sub = inst_name.split("/", 1)[1]
+                name_to_bin.setdefault(sub, bin_idx)
+                if "[" in sub and r"\[" not in sub:
+                    name_to_bin.setdefault(sub.replace("[", r"\[").replace("]", r"\]"), bin_idx)
+                elif r"\[" in sub:
+                    name_to_bin.setdefault(sub.replace(r"\[", "[").replace(r"\]", "]"), bin_idx)
+
+            # Leaf name
+            leaf = inst_name.rsplit("/", 1)[-1] if "/" in inst_name else inst_name
+            leaf_to_bin.setdefault(leaf, bin_idx)
+            if "[" in leaf and r"\[" not in leaf:
+                leaf_to_bin.setdefault(leaf.replace("[", r"\[").replace("]", r"\]"), bin_idx)
+            elif r"\[" in leaf:
+                leaf_to_bin.setdefault(leaf.replace(r"\[", "[").replace(r"\]", "]"), bin_idx)
+
+        # 2. Map loaded DEF instances directly using fast lookup
+        if self.hasDesign():
+            chip = self.getChip() if hasattr(self, "getChip") and self.getChip() is not None else getattr(self, "_chip", None)
+            block = chip.getBlock() if chip else None
+            if block is not None:
+                inst_map = getattr(block, "_insts_by_name", None)
+                find_fn = inst_map.get if isinstance(inst_map, dict) else (block.findInst if hasattr(block, "findInst") else None)
+                if find_fn:
+                    for inst_name, rec in records.items():
+                        bin_idx = report.color_index(rec[0])
+                        inst = find_fn(inst_name)
+                        if inst is not None:
+                            name_to_bin[inst.getName()] = bin_idx
+                        else:
+                            clean = inst_name.split(":", 1)[0] if ":" in inst_name else inst_name
+                            inst = find_fn(clean)
+                            if inst is None and "/" in clean:
+                                inst = find_fn(clean.split("/", 1)[1])
+                            if inst is None and "[" in clean:
+                                inst = find_fn(clean.replace("[", r"\[").replace("]", r"\]"))
+                            elif inst is None and r"\[" in clean:
+                                inst = find_fn(clean.replace(r"\[", "[").replace(r"\]", "]"))
+                            if inst is not None:
+                                name_to_bin[inst.getName()] = bin_idx
+
+        self._ir_drop_name_to_bin = name_to_bin
+        self._ir_drop_leaf_to_bin = leaf_to_bin
+
 
 
     def _resolve_timing_path_points(self, path: Any) -> List[Point]:
@@ -1122,11 +1215,21 @@ class LayoutViewer(QWidget):
         grid_count = np.zeros((ny, nx), dtype=np.int32)
         grid_inst = np.empty((ny, nx), dtype=object)
 
-        self._ensure_alias_maps()
+        inst_map = getattr(block, "_insts_by_name", None)
+        find_fn = inst_map.get if isinstance(inst_map, dict) else (block.findInst if hasattr(block, "findInst") else None)
 
         # Iterate over records (typically 2k-50k instances in report, instead of 500k in DEF)
         for inst_name, rec in records.items():
-            inst = self.resolve_instance(inst_name)
+            inst = find_fn(inst_name) if find_fn else None
+            if inst is None and find_fn:
+                clean = inst_name.split(":", 1)[0] if ":" in inst_name else inst_name
+                inst = find_fn(clean)
+                if inst is None and "/" in clean:
+                    inst = find_fn(clean.split("/", 1)[1])
+                if inst is None and "[" in clean:
+                    inst = find_fn(clean.replace("[", r"\[").replace("]", r"\]"))
+                elif inst is None and r"\[" in clean:
+                    inst = find_fn(clean.replace(r"\[", "[").replace(r"\]", "]"))
             if inst is None or not inst.isPlaced():
                 continue
             drop_mv = rec[0]
@@ -1208,20 +1311,27 @@ class LayoutViewer(QWidget):
             return
         if self._ir_drop_heatmap_image is None and not getattr(self, "_ir_drop_heatmap_attempted", False):
             self._ensure_ir_drop_heatmap()
-        if self._ir_drop_heatmap_image is None or self._ir_drop_heatmap_image.isNull() or self._ir_drop_heatmap_core is None:
-            return
 
-        painter.save()
-        p1 = self.dbuPointToScreen(Point(self._ir_drop_heatmap_core.xMin(), self._ir_drop_heatmap_core.yMax()))
-        p2 = self.dbuPointToScreen(Point(self._ir_drop_heatmap_core.xMax(), self._ir_drop_heatmap_core.yMin()))
-        w = p2.x() - p1.x()
-        h = p2.y() - p1.y()
-        if w > 1 and h > 1:
-            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            painter.drawImage(QRectF(p1.x(), p1.y(), w, h), self._ir_drop_heatmap_image)
+        ppd = getattr(self, "pixels_per_dbu", 1.0)
+        # Draw full-chip heatmap raster only when extremely zoomed out (cells < 1.5 screen pixels)
+        # When cells are viewable, the standard cells themselves are individually colored!
+        if (
+            ppd * 1400.0 < 1.5
+            and self._ir_drop_heatmap_image is not None
+            and not self._ir_drop_heatmap_image.isNull()
+            and self._ir_drop_heatmap_core is not None
+        ):
+            painter.save()
+            p1 = self.dbuPointToScreen(Point(self._ir_drop_heatmap_core.xMin(), self._ir_drop_heatmap_core.yMax()))
+            p2 = self.dbuPointToScreen(Point(self._ir_drop_heatmap_core.xMax(), self._ir_drop_heatmap_core.yMin()))
+            w = p2.x() - p1.x()
+            h = p2.y() - p1.y()
+            if w > 1 and h > 1:
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                painter.drawImage(QRectF(p1.x(), p1.y(), w, h), self._ir_drop_heatmap_image)
+            painter.restore()
 
         self._draw_ir_drop_hud_legend(painter)
-        painter.restore()
 
     def _draw_ir_drop_hud_legend(self, painter: QPainter) -> None:
         """Renders sleek EDA IR-drop spectrum gradient bar and statistics HUD card."""

@@ -584,6 +584,8 @@ class IRDropWidget(QWidget):
     def _on_map_toggled(self, checked: bool) -> None:
         self.map_visibility_changed.emit(checked)
         if self._layout_viewer is not None:
+            if checked and self._report is not None:
+                self._layout_viewer.setIRDropData(self._report)
             self._layout_viewer.setIRDropMapVisible(checked)
 
     def _sync_map_data(self) -> None:

@@ -328,4 +328,169 @@ def test_ir_drop_navigation_keeps_dock_raised(qapp):
     # IR Drop dock must be raised
     win._ir_drop_dock.raise_.assert_called()
 
-    win.close()
+    win.close()
+
+
+def test_ir_drop_standard_cells_colored_when_map_active(qapp):
+    report = IRDropReportData(
+        records_by_instance={"top/cell_hotspot": (140.0, "BUF_X4")},
+        ordered_instances=["top/cell_hotspot"],
+        minimum_mv=0.0,
+        maximum_mv=140.0,
+        bins=[IRDropBin(0.0, 140.0, 1)],
+    )
+
+    class FakeMaster:
+        def isMacro(self):
+            return False
+        def getHeight(self):
+            return 1000
+        def getWidth(self):
+            return 1000
+        def getPlacementBoundary(self):
+            return Rect(0, 0, 1000, 1000)
+
+    class FakeInst:
+        def __init__(self, name, rect):
+            self._name = name
+            self._rect = rect
+            self._master = FakeMaster()
+        def getName(self):
+            return self._name
+        def getMaster(self):
+            return self._master
+        def getBBox(self):
+            class BBoxWrapper:
+                def __init__(self, r): self._r = r
+                def getBox(self): return self._r
+            return BBoxWrapper(self._rect)
+        def getTransform(self):
+            return None
+
+    inst_hotspot = FakeInst("top/cell_hotspot", Rect(2, 2, 10, 10))
+    inst_other = FakeInst("top/cell_other", Rect(12, 2, 20, 10))
+
+    class FakeOptions:
+        def areStandardCellsVisible(self): return True
+        def areMacrosVisible(self): return True
+        def cellColor(self): return QColor(120, 120, 120)
+        def macroBorderColor(self): return QColor(200, 200, 200)
+        def macroColor(self): return QColor(50, 50, 50)
+
+    class FakeViewer:
+        def __init__(self):
+            self._options = FakeOptions()
+            self._ir_drop_data = report
+            self._ir_drop_map_visible = False
+            self.pixels_per_dbu = 1.0
+            self._restart = False
+            self._ir_drop_name_to_bin = {"top/cell_hotspot": 4}
+            self._ir_drop_leaf_to_bin = {"cell_hotspot": 4}
+        def getOptions(self): return self._options
+        def nominalViewableResolution(self): return 100
+
+    viewer = FakeViewer()
+    renderer = RenderThread(viewer)
+
+    # 1. Default mode: IR drop map OFF -> standard cells drawn with normal grey cell_pen and Qt.NoBrush
+    image_default = QImage(30, 20, QImage.Format_ARGB32_Premultiplied)
+    image_default.fill(QColor(0, 0, 0))
+    p_default = QPainter(image_default)
+    renderer.drawInstanceOutlines(p_default, [inst_hotspot, inst_other])
+    p_default.end()
+
+    # The interior of the cell (at 5, 5) must be empty (Qt.NoBrush)
+    assert image_default.pixelColor(5, 5) == QColor(0, 0, 0)
+    # The outline of the cell must be greyish options.cellColor()
+    assert image_default.pixelColor(2, 2) == QColor(120, 120, 120)
+
+    # 2. IR drop map ON -> cell_hotspot must be filled with IR drop bin 4 palette color (#D8588A)
+    viewer._ir_drop_map_visible = True
+    image_ir = QImage(30, 20, QImage.Format_ARGB32_Premultiplied)
+    image_ir.fill(QColor(0, 0, 0))
+    p_ir = QPainter(image_ir)
+    renderer.drawInstanceOutlines(p_ir, [inst_hotspot, inst_other])
+    p_ir.end()
+
+    expected_color = QColor(IR_DROP_PALETTE[4])
+    # The interior of cell_hotspot must now be filled with IR drop color!
+    assert image_ir.pixelColor(5, 5) == expected_color
+
+    # Meanwhile cell_other without IR drop data remains un-filled
+    assert image_ir.pixelColor(15, 5) == QColor(0, 0, 0)
+    assert image_ir.pixelColor(12, 2) == QColor(120, 120, 120)
+
+
+def test_ir_drop_drawchip_queries_standard_cells(qapp):
+    report = IRDropReportData(
+        records_by_instance={"top/u_cell": (100.0, "INV_X1")},
+        ordered_instances=["top/u_cell"],
+        minimum_mv=0.0,
+        maximum_mv=100.0,
+        bins=[IRDropBin(0.0, 100.0, 1)],
+    )
+
+    class FakeOptions:
+        def areStandardCellsVisible(self): return False  # Intentionally toggled off in options
+        def areMacrosVisible(self): return True
+        def areInstancesVisible(self): return False  # Intentionally toggled off in options
+        def areInstanceOutlinesVisible(self): return False
+        def areBlockagesVisible(self): return False
+        def areRowsVisible(self): return False
+        def areInstanceNamesVisible(self): return False
+        def areIOPinsVisible(self): return False
+        def isDieBoundaryVisible(self): return False
+        def isCoreBoundaryVisible(self): return False
+        def isPolygonBoundaryVisible(self): return False
+        def cellColor(self): return QColor(120, 120, 120)
+        def macroBorderColor(self): return QColor(200, 200, 200)
+        def macroColor(self): return QColor(50, 50, 50)
+
+    class FakeSearch:
+        def __init__(self):
+            self.last_query = {}
+        def searchInsts(self, block, xMin, yMin, xMax, yMax, min_size=0, show_std_cells=True, show_macros=True):
+            self.last_query = {
+                "min_size": min_size,
+                "show_std_cells": show_std_cells,
+                "show_macros": show_macros,
+            }
+            return []
+
+    class FakeBlock:
+        def getDieArea(self): return Rect(0, 0, 1000, 1000)
+        def getCoreArea(self): return Rect(0, 0, 1000, 1000)
+        def getRows(self): return []
+        def getTech(self): return None
+
+    class FakeViewer:
+        def __init__(self):
+            self._options = FakeOptions()
+            self._search = FakeSearch()
+            self._ir_drop_data = report
+            self._ir_drop_map_visible = True
+            self.pixels_per_dbu = 0.002
+            self._restart = False
+            self._ir_drop_name_to_bin = {"top/u_cell": 2}
+            self._ir_drop_leaf_to_bin = {"u_cell": 2}
+        def getOptions(self): return self._options
+        def getSearch(self): return self._search
+        def instanceSizeLimit(self): return 5000
+        def nominalViewableResolution(self): return 100
+
+    viewer = FakeViewer()
+    renderer = RenderThread(viewer)
+    renderer.drawInstanceOutlines = MagicMock()
+
+    dummy_img = QImage(10, 10, QImage.Format_ARGB32_Premultiplied)
+    painter = QPainter(dummy_img)
+    gui_painter = MagicMock()
+    renderer.drawChip(painter, FakeBlock(), Rect(0, 0, 1000, 1000), gui_painter)
+    painter.end()
+
+    # Verify searchInsts was called with standard cells forced visible and relaxed size limit
+    assert viewer._search.last_query["show_std_cells"] is True
+    # At ppd=0.002, 0.5 / 0.002 = 250 DBU, much smaller than viewer.instanceSizeLimit() (5000)
+    assert viewer._search.last_query["min_size"] == 250
+    # drawInstanceOutlines must have been invoked
+    renderer.drawInstanceOutlines.assert_called_once()

@@ -206,7 +206,16 @@ class RenderThread(QThread):
             return
 
         # 2. Query visible instances (L1210-1230)
-        inst_limit = self._viewer.instanceSizeLimit()
+        ir_drop_active = bool(
+            getattr(self._viewer, "_ir_drop_map_visible", False)
+            and getattr(self._viewer, "_ir_drop_data", None) is not None
+        )
+        if ir_drop_active:
+            ppd = getattr(self._viewer, "pixels_per_dbu", 1.0)
+            inst_limit = max(int(0.5 / max(ppd, 1e-6)), 0) if ppd > 0 else 0
+        else:
+            inst_limit = self._viewer.instanceSizeLimit()
+
         insts = search.searchInsts(
             block,
             bounds.xMin(),
@@ -214,14 +223,14 @@ class RenderThread(QThread):
             bounds.xMax(),
             bounds.yMax(),
             inst_limit,
-            show_std_cells=options.areStandardCellsVisible(),
+            show_std_cells=options.areStandardCellsVisible() or ir_drop_active,
             show_macros=options.areMacrosVisible(),
         )
         # DEBUG
         # print(f"DEBUG: drawChip bounds={bounds}, inst_limit={inst_limit}, found {len(insts)} insts")
 
         # 3. Draw instance outlines (L1237)
-        if options.areInstancesVisible() and options.areInstanceOutlinesVisible():
+        if (options.areInstancesVisible() and options.areInstanceOutlinesVisible()) or ir_drop_active:
             self.drawInstanceOutlines(painter, insts)
 
         if self._restart:
@@ -267,49 +276,47 @@ class RenderThread(QThread):
         """Draws a distinct translucent IR-drop range color over standard-cell footprints."""
         if not insts or getattr(self._viewer, "pixels_per_dbu", 1.0) <= 0:
             return
-        report = self._viewer._ir_drop_data
+        report = getattr(self._viewer, "_ir_drop_data", None)
         if report is None:
             return
-        records = report.records_by_instance
+
+        name_to_bin = getattr(self._viewer, "_ir_drop_name_to_bin", None)
+        if name_to_bin is None:
+            records = getattr(report, "records_by_instance", {})
+            name_to_bin = {k: report.color_index(v[0]) for k, v in records.items()}
+        leaf_to_bin = getattr(self._viewer, "_ir_drop_leaf_to_bin", {})
+
         brushes = []
         pens = []
         for color_hex in IR_DROP_PALETTE:
             color = QColor(color_hex)
-            pens.append(QPen(color.lighter(125), 1))
+            pen = QPen(color.lighter(125), 0)
+            pen.setCosmetic(True)
+            pens.append(pen)
             color.setAlpha(175)
             brushes.append(QBrush(color))
 
-        leaf_map = getattr(self._viewer, "_leaf_map", None)
-
         painter.save()
+        last_idx = None
         for index, inst in enumerate(insts):
             if index % 2000 == 0 and self._restart:
                 break
             if inst.getMaster().isMacro():
                 continue
             name = inst.getName()
-            record = records.get(name)
-            if record is None:
-                if r"\[" in name:
-                    record = records.get(name.replace(r"\[", "[").replace(r"\]", "]"))
-                elif "[" in name:
-                    record = records.get(name.replace("[", r"\[").replace("]", r"\]"))
-            if record is None and leaf_map:
-                leaf = name.rsplit("/", 1)[-1]
-                record = records.get(leaf)
-                if record is None:
-                    if r"\[" in leaf:
-                        record = records.get(leaf.replace(r"\[", "[").replace(r"\]", "]"))
-                    elif "[" in leaf:
-                        record = records.get(leaf.replace("[", r"\[").replace("]", r"\]"))
-            if record is None:
+            idx = name_to_bin.get(name)
+            if idx is None and leaf_to_bin:
+                leaf = name.rsplit("/", 1)[-1] if "/" in name else name
+                idx = leaf_to_bin.get(leaf)
+            if idx is None:
                 continue
             box = inst.getBBox().getBox()
             if box.area() <= 0:
                 continue
-            idx = report.color_index(record[0])
-            painter.setPen(pens[idx])
-            painter.setBrush(brushes[idx])
+            if idx != last_idx:
+                painter.setPen(pens[idx])
+                painter.setBrush(brushes[idx])
+                last_idx = idx
             painter.drawRect(box.xMin(), box.yMin(), box.dx(), box.dy())
         painter.restore()
 
@@ -349,6 +356,8 @@ class RenderThread(QThread):
 
     # Ported from: gui/src/renderThread.cpp:271 addInstTransform
     def addInstTransform(self, xfm: QTransform, inst_xfm) -> None:
+        if inst_xfm is None:
+            return
         xfm.translate(inst_xfm.getOffset().x, inst_xfm.getOffset().y)
         o = inst_xfm.getOrient()
         if o == dbOrientType.R0:
@@ -377,14 +386,18 @@ class RenderThread(QThread):
     # Ported from: gui/src/renderThread.cpp:510 drawInstanceOutlines
     def drawInstanceOutlines(self, painter: QPainter, insts: List[dbInst]) -> None:
         options = self._viewer.getOptions()
-        show_std_cells = options.areStandardCellsVisible()
+        ir_drop_active = bool(
+            getattr(self._viewer, "_ir_drop_map_visible", False)
+            and getattr(self._viewer, "_ir_drop_data", None) is not None
+        )
+        show_std_cells = options.areStandardCellsVisible() or ir_drop_active
         show_macros = options.areMacrosVisible()
         if not show_std_cells and not show_macros:
             return
 
         min_tag_height = self._viewer.nominalViewableResolution()
         initial_xfm = painter.transform()
-        ppd = self._viewer.pixels_per_dbu
+        ppd = getattr(self._viewer, "pixels_per_dbu", 1.0)
 
         cell_pen = QPen(options.cellColor(), 0)
         cell_pen.setCosmetic(True)
@@ -393,8 +406,29 @@ class RenderThread(QThread):
         macro_pen.setCosmetic(True)
         macro_brush = QBrush(options.macroColor())
 
-        # Track active pen to avoid redundant C++ state switches
-        last_mode = None  # "macro" or "cell"
+        if ir_drop_active:
+            name_to_bin = getattr(self._viewer, "_ir_drop_name_to_bin", None)
+            if name_to_bin is None:
+                report = getattr(self._viewer, "_ir_drop_data", None)
+                records = getattr(report, "records_by_instance", {}) if report else {}
+                name_to_bin = {k: report.color_index(v[0]) for k, v in records.items()} if report else {}
+            leaf_to_bin = getattr(self._viewer, "_ir_drop_leaf_to_bin", {})
+
+            bin_pens = []
+            bin_brushes = []
+            for c_hex in IR_DROP_PALETTE:
+                c = QColor(c_hex)
+                pen = QPen(c.lighter(125), 0)
+                pen.setCosmetic(True)
+                bin_pens.append(pen)
+                bin_brushes.append(QBrush(c))
+        else:
+            name_to_bin = {}
+            leaf_to_bin = {}
+            bin_pens = []
+            bin_brushes = []
+
+        last_mode = None  # "macro", "cell", or ("ir_cell", bin_idx)
 
         for idx, inst in enumerate(insts):
             if idx % 1000 == 0 and self._restart:
@@ -424,14 +458,35 @@ class RenderThread(QThread):
             else:
                 if not show_std_cells:
                     continue
-                if last_mode != "cell":
-                    painter.setTransform(initial_xfm)
-                    painter.setPen(cell_pen)
-                    painter.setBrush(Qt.NoBrush)
-                    last_mode = "cell"
 
                 bbox = inst.getBBox().getBox()
-                painter.drawRect(bbox.xMin(), bbox.yMin(), bbox.dx(), bbox.dy())
+                if ir_drop_active:
+                    name = inst.getName()
+                    bin_idx = name_to_bin.get(name)
+                    if bin_idx is None and leaf_to_bin:
+                        leaf = name.rsplit("/", 1)[-1] if "/" in name else name
+                        bin_idx = leaf_to_bin.get(leaf)
+
+                    current_mode = ("ir_cell", bin_idx)
+                    if last_mode != current_mode:
+                        painter.setTransform(initial_xfm)
+                        if bin_idx is not None:
+                            painter.setPen(bin_pens[bin_idx])
+                            painter.setBrush(bin_brushes[bin_idx])
+                        else:
+                            painter.setPen(cell_pen)
+                            painter.setBrush(Qt.NoBrush)
+                        last_mode = current_mode
+
+                    painter.drawRect(bbox.xMin(), bbox.yMin(), bbox.dx(), bbox.dy())
+                else:
+                    if last_mode != "cell":
+                        painter.setTransform(initial_xfm)
+                        painter.setPen(cell_pen)
+                        painter.setBrush(Qt.NoBrush)
+                        last_mode = "cell"
+
+                    painter.drawRect(bbox.xMin(), bbox.yMin(), bbox.dx(), bbox.dy())
 
                 mh = master.getHeight()
                 if mh >= min_tag_height:
@@ -445,6 +500,7 @@ class RenderThread(QThread):
                     tag_y = mbox.yMin() + tag_w * 2
                     painter.drawLine(QPointF(tag_x, mbox.yMin()), QPointF(mbox.xMin(), tag_y))
                     painter.setTransform(initial_xfm)
+                    last_mode = None
 
         painter.setTransform(initial_xfm)
 
