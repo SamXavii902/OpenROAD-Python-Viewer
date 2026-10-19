@@ -102,6 +102,6 @@ def test_ir_drop_hotspot_uses_animated_layout_navigation(qapp):
         win._on_ir_drop_instance_selected("top/u_hotspot")
 
     zoom_to.assert_called_once_with(box, animate=True)
-    select_instance.assert_called_once_with(instance)
-    inspect_instance.assert_called_once_with(instance)
+    select_instance.assert_called_once_with(instance, emit_signal=False)
+    inspect_instance.assert_not_called()
     win.close()

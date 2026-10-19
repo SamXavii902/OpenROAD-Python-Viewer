@@ -871,7 +871,7 @@ class MainWindow(QMainWindow):
             if ir_info is not None:
                 drop_mv, inst_name = ir_info
                 inst_str = f" ({inst_name})" if inst_name else ""
-                text += f"  |  ⚡ IR Drop: {drop_mv:.1f} mV{inst_str}"
+                text += f"  |  IR Drop: {drop_mv:.1f} mV{inst_str}"
         self._coords_label.setText(text)
 
     def _show_about(self) -> None:
@@ -1055,43 +1055,43 @@ class MainWindow(QMainWindow):
         if not self._viewer.hasDesign():
             self._status_bar.showMessage("Load a DEF design to navigate to an IR-drop hotspot", 4000)
             return
-        block = self._viewer.getChip().getBlock()
-        inst = block.findInst(instance_name)
-        if inst is None:
-            self._viewer._ensure_alias_maps()
-            leaf = instance_name.rsplit("/", 1)[-1]
-            matches = self._viewer._leaf_map.get(leaf, []) if self._viewer._leaf_map else []
-            if len(matches) == 1:
-                inst = matches[0]
+        inst = self._viewer.resolve_instance(instance_name)
         if inst is None:
             self._status_bar.showMessage(f"No DEF instance matches {instance_name}", 5000)
             return
         box = inst.getBBox().getBox()
         self._viewer.zoomTo(box, animate=self._viewer.isVisible())
-        self._viewer.selectInstance(inst)
-        self._inspector.inspect_instance(inst)
+        self._viewer.selectInstance(inst, emit_signal=False)
 
         # Highlight cell with its exact IR-drop bin color and ping
         report = getattr(self._viewer, "_ir_drop_data", None)
-        rec = report.records_by_instance.get(inst.getName()) if report else None
-        if rec is None and report:
-            leaf = inst.getName().rsplit("/", 1)[-1]
-            rec = report.records_by_instance.get(leaf)
+        rec = None
+        if report:
+            rec = report.records_by_instance.get(instance_name)
+            if rec is None:
+                rec = report.records_by_instance.get(inst.getName())
+            if rec is None:
+                leaf = inst.getName().rsplit("/", 1)[-1]
+                rec = report.records_by_instance.get(leaf)
 
         if rec is not None and report:
             drop_mv, cell_type = rec
             color_idx = report.color_index(drop_mv)
             bin_color = QColor(IR_DROP_PALETTE[color_idx])
-            self._viewer.highlightObject(box, label=f"⚡ {inst.getName()} ({drop_mv:.1f} mV)", color=bin_color)
+            self._viewer.highlightObject(box, label=f"{inst.getName()} ({drop_mv:.1f} mV)", color=bin_color)
             self._viewer.pingLocation(box.center(), color=bin_color)
             self._status_bar.showMessage(
-                f"⚡ IR-Drop Hotspot: {inst.getName()} | Drop: {drop_mv:.2f} mV | Cell: {cell_type} | Range: Bin {color_idx + 1}/5",
+                f"IR-Drop Hotspot: {inst.getName()} | Drop: {drop_mv:.2f} mV | Cell: {cell_type} | Range: Bin {color_idx + 1}/5",
                 6000,
             )
         else:
-            self._viewer.highlightObject(box, label=f"⚡ {inst.getName()}")
+            self._viewer.highlightObject(box, label=f"{inst.getName()}")
             self._viewer.pingLocation(box.center(), color=QColor("#D8588A"))
             self._status_bar.showMessage(f"IR-drop hotspot: {inst.getName()}", 5000)
+
+        # Ensure IR Drop dock remains raised and active
+        if hasattr(self, "_ir_drop_dock") and self._ir_drop_dock is not None:
+            self._ir_drop_dock.raise_()
 
     def _on_timing_path_selected(self, path: Any, zoom: bool) -> None:
         """Highlights selected timing path on chip layout canvas and optionally zooms."""

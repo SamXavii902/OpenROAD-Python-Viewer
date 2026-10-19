@@ -1,15 +1,16 @@
-"""Tests for IR-drop report parsing and interactive visualization."""
-
 import os
+from unittest.mock import MagicMock
 
 import pytest
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 from rishi.gui.irDropWidget import IRDropWidget
+from rishi.gui.layoutViewer import LayoutViewer
+from rishi.gui.mainWindow import MainWindow
 from rishi.gui.renderThread import RenderThread
 from rishi.irdrop.report import IR_DROP_PALETTE, IRDropBin, IRDropParser, IRDropReportData
-from rishi.odb.geom import Rect
+from rishi.odb.geom import Point, Rect
 
 
 @pytest.fixture(scope="session")
@@ -170,10 +171,6 @@ def test_ir_drop_precomputed_bins_and_instant_filtering(tmp_path):
 
 
 def test_ir_drop_heatmap_raster_and_probe(qapp):
-    from unittest.mock import MagicMock
-    from rishi.gui.layoutViewer import LayoutViewer
-    from rishi.odb.geom import Point, Rect
-
     report = IRDropReportData(
         records_by_instance={"top/cell_a": (120.0, "BUF_X1"), "top/cell_b": (30.0, "INV_X1")},
         ordered_instances=["top/cell_a", "top/cell_b"],
@@ -200,6 +197,7 @@ def test_ir_drop_heatmap_raster_and_probe(qapp):
 
     chip = MagicMock()
     chip.getBlock.return_value = block
+    block.findInst.side_effect = lambda name: inst_a if name in ("top/cell_a", "cell_a") else None
     viewer._chip = chip
     viewer.setIRDropData(report)
     viewer.setIRDropMapVisible(True)
@@ -216,3 +214,118 @@ def test_ir_drop_heatmap_raster_and_probe(qapp):
     assert drop_val > 0
 
     viewer.close()
+
+
+def test_ir_drop_parser_sanitizes_pin_suffixes(tmp_path):
+    report = tmp_path / "ir_pins.rpt"
+    report.write_text(
+        """0.7935 0.8903 0.7935 0 10 20 0.93 vdd/gnd CELL_X1 u_core/inst_a:VDD
+0.8000 0.8903 0.8000 0 10 20 0.93 vdd/gnd CELL_X1 u_core/inst_b/VSS
+0.8500 0.9000 0.8500 0 10 20 0.92 vdd/gnd CELL_X2 u_core/inst_c
+""",
+        encoding="utf-8",
+    )
+    data = IRDropParser().parse_file(str(report))
+    assert "u_core/inst_a" in data.records_by_instance
+    assert "u_core/inst_b" in data.records_by_instance
+    assert "u_core/inst_c" in data.records_by_instance
+
+
+def test_layout_viewer_resolve_instance(qapp):
+    viewer = LayoutViewer()
+    block = MagicMock()
+
+    inst1 = MagicMock()
+    inst1.getName.return_value = r"u_cpu/reg\[0\]"
+    inst2 = MagicMock()
+    inst2.getName.return_value = "u_cpu/alu"
+
+    inst_map = {
+        r"u_cpu/reg\[0\]": inst1,
+        "u_cpu/alu": inst2,
+    }
+    block.findInst.side_effect = lambda n: inst_map.get(n)
+    block.getInsts.return_value = [inst1, inst2]
+
+    chip = MagicMock()
+    chip.getBlock.return_value = block
+    viewer._chip = chip
+
+    # Escaped bracket resolution
+    assert viewer.resolve_instance("u_cpu/reg[0]") is inst1
+    # Pin suffix resolution
+    assert viewer.resolve_instance("u_cpu/alu:VDD") is inst2
+    # Slash pin suffix resolution
+    assert viewer.resolve_instance("u_cpu/alu/VDD") is inst2
+    # Prefix stripping resolution
+    assert viewer.resolve_instance("top/u_cpu/alu") is inst2
+    # Escaped prefix stripping resolution
+    assert viewer.resolve_instance("top/u_cpu/reg[0]") is inst1
+    # Cached resolution
+    assert viewer.resolve_instance("u_cpu/reg[0]") is inst1
+
+    viewer.close()
+
+
+def test_ir_drop_heatmap_empty_guard(qapp):
+    viewer = LayoutViewer()
+    block = MagicMock()
+    core = Rect(0, 0, 100000, 100000)
+    block.getCoreArea.return_value = core
+    block.getDieArea.return_value = core
+    block.findInst.return_value = None
+    block.getInsts.return_value = []
+
+    chip = MagicMock()
+    chip.getBlock.return_value = block
+    viewer._chip = chip
+
+    report = IRDropReportData(
+        records_by_instance={"missing_inst": (120.0, "BUF_X1")},
+        minimum_mv=0.0,
+        maximum_mv=120.0,
+    )
+    viewer.setIRDropData(report)
+
+    # First attempt: should detect no placed matching instances and set guard
+    viewer._ensure_ir_drop_heatmap()
+    assert viewer._ir_drop_heatmap_attempted is True
+    assert viewer._ir_drop_heatmap_image is not None
+    assert viewer._ir_drop_heatmap_image.isNull()
+
+    # Second call should immediately return without reprocessing
+    viewer._ensure_ir_drop_heatmap()
+    assert viewer._ir_drop_heatmap_attempted is True
+
+    viewer.close()
+
+
+def test_ir_drop_navigation_keeps_dock_raised(qapp):
+    win = MainWindow()
+    mock_inst = MagicMock()
+    mock_inst.getName.return_value = "u_cpu/hotspot"
+    bbox = MagicMock()
+    bbox.getBox.return_value = Rect(100, 100, 200, 200)
+    mock_inst.getBBox.return_value = bbox
+
+    win._viewer.resolve_instance = MagicMock(return_value=mock_inst)
+    win._viewer.hasDesign = MagicMock(return_value=True)
+    win._viewer.selectInstance = MagicMock()
+    win._viewer.zoomTo = MagicMock()
+    win._inspector.inspect_instance = MagicMock()
+    win._inspector.raise_ = MagicMock()
+    win._ir_drop_dock.raise_ = MagicMock()
+
+    win._on_ir_drop_instance_selected("u_cpu/hotspot")
+
+    # Inspector must NOT be inspected or raised
+    win._inspector.inspect_instance.assert_not_called()
+    win._inspector.raise_.assert_not_called()
+
+    # selectInstance called with emit_signal=False so inspector is not raised via signal
+    win._viewer.selectInstance.assert_called_with(mock_inst, emit_signal=False)
+
+    # IR Drop dock must be raised
+    win._ir_drop_dock.raise_.assert_called()
+
+    win.close()

@@ -118,7 +118,14 @@ class IRDropParser:
                         simulated_voltage = float(fields[2])
                         ideal_voltage = float(fields[6])
                         cell_type = sys.intern(fields[8].decode("utf-8", errors="replace"))
-                        instance = fields[9].decode("utf-8", errors="replace")
+                        instance = fields[9].decode("utf-8", errors="replace").strip()
+                        if ":" in instance:
+                            instance = instance.split(":", 1)[0]
+                        inst_upper = instance.upper()
+                        for pin_suffix in ("/VDD", "/VSS", "/GND", "/VPWR", "/VGND", "/VDDIO", "/VSSIO", "/VDD_CORE", "/VSS_CORE"):
+                            if inst_upper.endswith(pin_suffix) and len(instance) > len(pin_suffix):
+                                instance = instance[:-len(pin_suffix)]
+                                break
                         drop_mv = round((ideal_voltage - simulated_voltage) * 1000.0, 6)
                     except (ValueError, UnicodeDecodeError):
                         continue

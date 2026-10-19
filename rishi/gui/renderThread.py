@@ -206,8 +206,7 @@ class RenderThread(QThread):
             return
 
         # 2. Query visible instances (L1210-1230)
-        ir_drop_active = self._viewer._ir_drop_map_visible and self._viewer._ir_drop_data is not None
-        inst_limit = 0 if ir_drop_active else self._viewer.instanceSizeLimit()
+        inst_limit = self._viewer.instanceSizeLimit()
         insts = search.searchInsts(
             block,
             bounds.xMin(),
@@ -266,7 +265,11 @@ class RenderThread(QThread):
 
     def drawIRDropOverlay(self, painter: QPainter, insts: List[dbInst]) -> None:
         """Draws a distinct translucent IR-drop range color over standard-cell footprints."""
+        if not insts or getattr(self._viewer, "pixels_per_dbu", 1.0) <= 0:
+            return
         report = self._viewer._ir_drop_data
+        if report is None:
+            return
         records = report.records_by_instance
         brushes = []
         pens = []
@@ -286,9 +289,19 @@ class RenderThread(QThread):
                 continue
             name = inst.getName()
             record = records.get(name)
+            if record is None:
+                if r"\[" in name:
+                    record = records.get(name.replace(r"\[", "[").replace(r"\]", "]"))
+                elif "[" in name:
+                    record = records.get(name.replace("[", r"\[").replace("]", r"\]"))
             if record is None and leaf_map:
                 leaf = name.rsplit("/", 1)[-1]
                 record = records.get(leaf)
+                if record is None:
+                    if r"\[" in leaf:
+                        record = records.get(leaf.replace(r"\[", "[").replace(r"\]", "]"))
+                    elif "[" in leaf:
+                        record = records.get(leaf.replace("[", r"\[").replace("]", r"\]"))
             if record is None:
                 continue
             box = inst.getBBox().getBox()

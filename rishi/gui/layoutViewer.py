@@ -111,6 +111,8 @@ class LayoutViewer(QWidget):
         self._ir_drop_y0: float = 0.0
         self._ir_drop_bw: float = 0.0
         self._ir_drop_bh: float = 0.0
+        self._ir_drop_heatmap_attempted: bool = False
+        self._instance_resolve_cache: Dict[str, Any] = {}
 
         # 60 FPS Vector Animation Overlay Engine
         self._anim_timer = QTimer(self)
@@ -175,6 +177,8 @@ class LayoutViewer(QWidget):
         self._ir_drop_heatmap_image = None
         self._ir_drop_heatmap_core = None
         self._ir_drop_grid_drop = None
+        self._ir_drop_heatmap_attempted = False
+        self._instance_resolve_cache = {}
         if chip and chip.getTech():
             self._options.tech_init(chip.getTech())
         if chip and chip.getBlock():
@@ -571,6 +575,8 @@ class LayoutViewer(QWidget):
         self._ir_drop_heatmap_core = None
         self._ir_drop_grid_drop = None
         self._ir_drop_grid_inst = None
+        self._ir_drop_heatmap_attempted = False
+        self._instance_resolve_cache = {}
         self.fullRepaint()
 
     def setIRDropMapVisible(self, visible: bool) -> None:
@@ -579,6 +585,130 @@ class LayoutViewer(QWidget):
 
     def isIRDropMapVisible(self) -> bool:
         return self._ir_drop_map_visible and self._ir_drop_data is not None
+
+    def resolve_instance(self, instance_name: str) -> Optional[Any]:
+        """Resolves an instance by name across DEF naming discrepancies (escapes, prefixes, pins, leaf)."""
+        if not instance_name or not self.hasDesign():
+            return None
+
+        if not hasattr(self, "_instance_resolve_cache") or self._instance_resolve_cache is None:
+            self._instance_resolve_cache = {}
+        cached = self._instance_resolve_cache.get(instance_name)
+        if cached is not None:
+            return cached
+
+        chip = self.getChip() if hasattr(self, "getChip") and self.getChip() is not None else getattr(self, "_chip", None)
+        if chip is None:
+            return None
+        block = chip.getBlock()
+        if block is None:
+            return None
+
+        # 1. Direct match
+        inst = block.findInst(instance_name)
+        if inst is not None:
+            self._instance_resolve_cache[instance_name] = inst
+            return inst
+
+        # 2. Sanitize pin suffixes if present
+        clean_name = instance_name
+        if ":" in clean_name:
+            clean_name = clean_name.split(":", 1)[0]
+        clean_upper = clean_name.upper()
+        for pin_suffix in ("/VDD", "/VSS", "/GND", "/VPWR", "/VGND", "/VDDIO", "/VSSIO", "/VDD_CORE", "/VSS_CORE"):
+            if clean_upper.endswith(pin_suffix) and len(clean_name) > len(pin_suffix):
+                clean_name = clean_name[:-len(pin_suffix)]
+                break
+
+        if clean_name != instance_name:
+            inst = block.findInst(clean_name)
+            if inst is not None:
+                self._instance_resolve_cache[instance_name] = inst
+                return inst
+
+        # 3. Bracket escaping/unescaping variations
+        variants = []
+        if r"\[" in clean_name:
+            variants.append(clean_name.replace(r"\[", "[").replace(r"\]", "]"))
+        if "[" in clean_name and r"\[" not in clean_name:
+            variants.append(clean_name.replace("[", r"\[").replace("]", r"\]"))
+        if "." in clean_name and "/" not in clean_name:
+            variants.append(clean_name.replace(".", "/"))
+            if "[" in clean_name:
+                variants.append(clean_name.replace(".", "/").replace("[", r"\[").replace("]", r"\]"))
+
+        for v in variants:
+            inst = block.findInst(v)
+            if inst is not None:
+                self._instance_resolve_cache[instance_name] = inst
+                return inst
+
+        # 4. Multi-bit alias index
+        self._ensure_alias_maps()
+        if self._mbit_alias:
+            inst = self._mbit_alias.get(clean_name)
+            if inst is not None:
+                self._instance_resolve_cache[instance_name] = inst
+                return inst
+            for v in variants:
+                inst = self._mbit_alias.get(v)
+                if inst is not None:
+                    self._instance_resolve_cache[instance_name] = inst
+                    return inst
+
+        # 5. Top-level prefix stripping
+        if "/" in clean_name:
+            _, sub_name = clean_name.split("/", 1)
+            inst = block.findInst(sub_name)
+            if inst is not None:
+                self._instance_resolve_cache[instance_name] = inst
+                return inst
+            if r"\[" not in sub_name and "[" in sub_name:
+                inst = block.findInst(sub_name.replace("[", r"\[").replace("]", r"\]"))
+                if inst is not None:
+                    self._instance_resolve_cache[instance_name] = inst
+                    return inst
+
+        # 6. Leaf-level resolution with hierarchical disambiguation
+        leaf = clean_name.rsplit("/", 1)[-1] if "/" in clean_name else clean_name
+        leaf_variants = [leaf]
+        if r"\[" in leaf:
+            leaf_variants.append(leaf.replace(r"\[", "[").replace(r"\]", "]"))
+        if "[" in leaf and r"\[" not in leaf:
+            leaf_variants.append(leaf.replace("[", r"\[").replace("]", r"\]"))
+
+        if self._mbit_leaf_map:
+            for lv in leaf_variants:
+                cand = self._mbit_leaf_map.get(lv)
+                if cand:
+                    chosen = self._disambiguate_candidates(cand, clean_name)
+                    if chosen:
+                        self._instance_resolve_cache[instance_name] = chosen
+                        return chosen
+
+        if self._leaf_map:
+            for lv in leaf_variants:
+                cand = self._leaf_map.get(lv)
+                if cand:
+                    chosen = self._disambiguate_candidates(cand, clean_name)
+                    if chosen:
+                        self._instance_resolve_cache[instance_name] = chosen
+                        return chosen
+
+        return None
+
+    def _disambiguate_candidates(self, candidates: List[Any], full_name: str) -> Optional[Any]:
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        parent = full_name.rsplit("/", 1)[0] if "/" in full_name else ""
+        if parent:
+            for c in candidates:
+                if parent in c.getName():
+                    return c
+        return candidates[0]
+
 
     def _resolve_timing_path_points(self, path: Any) -> List[Point]:
         """Resolves ordered physical DBU points along the timing path with 2-tier caching."""
@@ -678,7 +808,7 @@ class LayoutViewer(QWidget):
 
         return pts
 
-    def selectInstance(self, inst: Optional[object]) -> None:
+    def selectInstance(self, inst: Optional[object], emit_signal: bool = True) -> None:
         """Selects an instance in viewport, highlights it, triggers sonar ping, and updates flightlines."""
         self._selected_inst = inst
         if inst is not None:
@@ -688,7 +818,8 @@ class LayoutViewer(QWidget):
         else:
             self.highlightObject(None)
         self._update_flightlines()
-        self.instance_selected.emit(inst)
+        if emit_signal:
+            self.instance_selected.emit(inst)
         self.update()
 
     def _update_flightlines(self) -> None:
@@ -948,8 +1079,12 @@ class LayoutViewer(QWidget):
 
     def _ensure_ir_drop_heatmap(self) -> None:
         """Precomputes 2D spatial voltage-drop thermal contour image matching EDA industry standards."""
+        if getattr(self, "_ir_drop_heatmap_attempted", False):
+            return
         if self._ir_drop_heatmap_image is not None or not self.hasDesign() or self._ir_drop_data is None:
             return
+
+        self._ir_drop_heatmap_attempted = True
         block = self._chip.getBlock()
         report = self._ir_drop_data
         records = getattr(report, "records_by_instance", None)
@@ -989,51 +1124,26 @@ class LayoutViewer(QWidget):
 
         self._ensure_alias_maps()
 
-        # Map instances to spatial grid bins
-        if hasattr(self._search, "_inst_boxes") and self._search._inst_boxes is not None and len(self._search._inst_boxes) > 0:
-            boxes = self._search._inst_boxes
-            insts = self._search._insts
-            for i in range(len(insts)):
-                inst = insts[i]
-                name = inst.getName()
-                rec = records.get(name)
-                if rec is None and self._leaf_map:
-                    leaf = name.rsplit("/", 1)[-1]
-                    rec = records.get(leaf)
-                if rec is None:
-                    continue
-                drop_mv = rec[0]
-                cx = (boxes[i, 0] + boxes[i, 2]) * 0.5
-                cy = (boxes[i, 1] + boxes[i, 3]) * 0.5
-                ix = int((cx - x0) * inv_bw)
-                iy = int((cy - y0) * inv_bh)
-                if 0 <= ix < nx and 0 <= iy < ny:
-                    if drop_mv > grid_drop[iy, ix]:
-                        grid_drop[iy, ix] = drop_mv
-                        grid_inst[iy, ix] = name
-                    grid_count[iy, ix] += 1
-        else:
-            for inst in block.getInsts():
-                if not inst.isPlaced():
-                    continue
-                name = inst.getName()
-                rec = records.get(name)
-                if rec is None and self._leaf_map:
-                    leaf = name.rsplit("/", 1)[-1]
-                    rec = records.get(leaf)
-                if rec is None:
-                    continue
-                drop_mv = rec[0]
-                c = inst.getBBox().getBox().center()
-                ix = int((c.x - x0) * inv_bw)
-                iy = int((c.y - y0) * inv_bh)
-                if 0 <= ix < nx and 0 <= iy < ny:
-                    if drop_mv > grid_drop[iy, ix]:
-                        grid_drop[iy, ix] = drop_mv
-                        grid_inst[iy, ix] = name
-                    grid_count[iy, ix] += 1
+        # Iterate over records (typically 2k-50k instances in report, instead of 500k in DEF)
+        for inst_name, rec in records.items():
+            inst = self.resolve_instance(inst_name)
+            if inst is None or not inst.isPlaced():
+                continue
+            drop_mv = rec[0]
+            bbox = inst.getBBox().getBox()
+            if bbox.area() <= 0:
+                continue
+            c = bbox.center()
+            ix = int((c.x - x0) * inv_bw)
+            iy = int((c.y - y0) * inv_bh)
+            if 0 <= ix < nx and 0 <= iy < ny:
+                if drop_mv > grid_drop[iy, ix]:
+                    grid_drop[iy, ix] = drop_mv
+                    grid_inst[iy, ix] = inst_name
+                grid_count[iy, ix] += 1
 
         if not np.any(grid_count > 0):
+            self._ir_drop_heatmap_image = QImage()
             return
 
         # Continuous thermal smoothing using gaussian filter (or fallback box filter)
@@ -1096,9 +1206,9 @@ class LayoutViewer(QWidget):
         """Renders continuous 2D voltage-drop heatmap and HUD legend card."""
         if not self._ir_drop_map_visible or self._ir_drop_data is None or not self.hasDesign():
             return
-        if self._ir_drop_heatmap_image is None:
+        if self._ir_drop_heatmap_image is None and not getattr(self, "_ir_drop_heatmap_attempted", False):
             self._ensure_ir_drop_heatmap()
-        if self._ir_drop_heatmap_image is None or self._ir_drop_heatmap_core is None:
+        if self._ir_drop_heatmap_image is None or self._ir_drop_heatmap_image.isNull() or self._ir_drop_heatmap_core is None:
             return
 
         painter.save()
@@ -1138,7 +1248,7 @@ class LayoutViewer(QWidget):
         title_font = QFont("Segoe UI", 8, QFont.Bold)
         painter.setFont(title_font)
         painter.setPen(QColor(230, 235, 245))
-        painter.drawText(x + 10, y + 16, "⚡ IR-Drop Heatmap")
+        painter.drawText(x + 10, y + 16, "IR-Drop Heatmap")
 
         stat_font = QFont("Segoe UI", 7, QFont.Normal)
         painter.setFont(stat_font)
@@ -1178,16 +1288,26 @@ class LayoutViewer(QWidget):
         """Returns the local IR drop in mV and instance name at the given DBU point, or None."""
         if self._ir_drop_data is None:
             return None
-        if getattr(self, "_ir_drop_grid_drop", None) is None:
+        if getattr(self, "_ir_drop_grid_drop", None) is None and not getattr(self, "_ir_drop_heatmap_attempted", False):
             self._ensure_ir_drop_heatmap()
 
         # First check if directly hitting a placed instance
         inst = self._hit_test_instance(pt_dbu)
         if inst is not None:
-            rec = self._ir_drop_data.records_by_instance.get(inst.getName())
+            name = inst.getName()
+            records = self._ir_drop_data.records_by_instance
+            rec = records.get(name)
+            if rec is None and r"\[" in name:
+                rec = records.get(name.replace(r"\[", "[").replace(r"\]", "]"))
+            if rec is None and "[" in name:
+                rec = records.get(name.replace("[", r"\[").replace("]", r"\]"))
             if rec is None and self._leaf_map:
-                leaf = inst.getName().rsplit("/", 1)[-1]
-                rec = self._ir_drop_data.records_by_instance.get(leaf)
+                leaf = name.rsplit("/", 1)[-1]
+                rec = records.get(leaf)
+                if rec is None and r"\[" in leaf:
+                    rec = records.get(leaf.replace(r"\[", "[").replace(r"\]", "]"))
+                elif rec is None and "[" in leaf:
+                    rec = records.get(leaf.replace("[", r"\[").replace("]", r"\]"))
             if rec is not None:
                 return (rec[0], inst.getName())
 

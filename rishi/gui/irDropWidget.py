@@ -160,7 +160,7 @@ class IRDropHistogramWidget(QWidget):
             self._hover_index = index
             if index is not None and index < len(self._bins):
                 item = self._bins[index]
-                self.setToolTip(f"{item.minimum_mv:.2f}–{item.maximum_mv:.2f} mV · {item.count:,} instances\nClick to filter")
+                self.setToolTip(f"{item.minimum_mv:.2f} - {item.maximum_mv:.2f} mV | {item.count:,} instances\nClick to filter")
             else:
                 self.setToolTip("")
             self.update()
@@ -266,7 +266,7 @@ class IRDropWidget(QWidget):
         self._load_button.clicked.connect(self._load_from_path)
         toolbar.addWidget(self._load_button)
 
-        self._map_toggle = QCheckBox("⚡ IR-Drop Layout Map")
+        self._map_toggle = QCheckBox("IR-Drop Map")
         self._map_toggle.setToolTip("Overlay 2D IR-drop thermal heatmap and colored cell footprints on layout")
         self._map_toggle.setStyleSheet("QCheckBox { color: #E2E8F0; font-weight: bold; font-size: 8pt; }")
         self._map_toggle.toggled.connect(self._on_map_toggled)
@@ -367,7 +367,7 @@ class IRDropWidget(QWidget):
         self._search.textChanged.connect(self._on_filter_changed)
         controls.addWidget(self._search, 1)
 
-        self._threshold_toggle = QCheckBox("Threshold ≥")
+        self._threshold_toggle = QCheckBox("Threshold >=")
         self._threshold_toggle.setStyleSheet("QCheckBox { color: #A0A8B8; font-size: 8pt; }")
         self._threshold_toggle.toggled.connect(self._on_filter_changed)
         controls.addWidget(self._threshold_toggle)
@@ -400,12 +400,12 @@ class IRDropWidget(QWidget):
         self._instance_table = self._create_table(("Drop (mV)", "Cell Type", "Instance Name"))
         self._instance_table.cellClicked.connect(self._on_instance_row_clicked)
         self._instance_table.cellDoubleClicked.connect(self._on_instance_row_clicked)
-        self._tabs.addTab(self._instance_table, "🔥 Hotspot Instances")
+        self._tabs.addTab(self._instance_table, "Hotspots")
 
         self._cell_table = self._create_table(("Cell Type", "Instances", "Mean (mV)", "Worst (mV)", "Worst Instance"))
         self._cell_table.cellClicked.connect(self._on_cell_type_row_clicked)
         self._cell_table.cellDoubleClicked.connect(self._on_cell_type_row_clicked)
-        self._tabs.addTab(self._cell_table, "📊 Cell Type Analysis")
+        self._tabs.addTab(self._cell_table, "Cell Types")
         root.addWidget(self._tabs, 1)
 
         # 7. Pagination Toolbar
@@ -414,11 +414,11 @@ class IRDropWidget(QWidget):
         self._result_count.setStyleSheet("color: #8E9AA5; font-size: 8pt;")
         paging.addWidget(self._result_count, 1)
 
-        self._status = QLabel("Drop = ideal_voltage − min_pg_sim")
+        self._status = QLabel("Drop = ideal_voltage - min_pg_sim")
         self._status.setStyleSheet("color: #707888; font-size: 7.5pt; font-style: italic;")
         paging.addWidget(self._status)
 
-        self._prev_button = QPushButton("◀ Prev")
+        self._prev_button = QPushButton("Previous")
         self._prev_button.clicked.connect(self._previous_page)
         paging.addWidget(self._prev_button)
 
@@ -426,7 +426,7 @@ class IRDropWidget(QWidget):
         self._page_label.setStyleSheet("color: #CBD5E1; font-weight: bold; font-size: 8pt; padding: 0 4px;")
         paging.addWidget(self._page_label)
 
-        self._next_button = QPushButton("Next ▶")
+        self._next_button = QPushButton("Next")
         self._next_button.clicked.connect(self._next_page)
         paging.addWidget(self._next_button)
         root.addLayout(paging)
@@ -517,10 +517,10 @@ class IRDropWidget(QWidget):
         for index, label in enumerate(self._map_legend_labels):
             low = report.minimum_mv + span * index / palette_count
             high = report.minimum_mv + span * (index + 1) / palette_count
-            label.setText(f"{low:.1f}–{high:.1f}")
+            label.setText(f"{low:.1f}-{high:.1f}")
 
         self._status.setText(
-            f"{report.record_count:,} rows · {report.instance_count:,} cells · drop = ideal − min_pg_sim"
+            f"{report.record_count:,} rows | {report.instance_count:,} cells | drop = ideal - min_pg_sim"
         )
         self._populate_cell_types()
         self._sync_map_data()
@@ -548,8 +548,8 @@ class IRDropWidget(QWidget):
         self._search.clear()
         self._map_toggle.setChecked(False)
         for label in self._metric_labels.values():
-            label.setText("—")
-        self._status.setText("Drop = ideal_voltage − min_pg_sim")
+            label.setText("-")
+        self._status.setText("Drop = ideal_voltage - min_pg_sim")
         self._result_count.setText("No report loaded")
         self._page_label.setText("Page 0 / 0")
         self._sync_map_data()
@@ -705,7 +705,7 @@ class IRDropWidget(QWidget):
             self._instance_table.setUpdatesEnabled(True)
 
         self._result_count.setText(
-            f"{len(self._filtered_instances):,} matching instances · {self._report.instance_count:,} total"
+            f"{len(self._filtered_instances):,} matching instances | {self._report.instance_count:,} total"
         )
         self._page_label.setText(f"Page {self._page + 1 if page_count else 0} / {page_count}")
         self._prev_button.setEnabled(self._page > 0)
