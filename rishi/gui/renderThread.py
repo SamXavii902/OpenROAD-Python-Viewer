@@ -14,6 +14,7 @@ from PySide6.QtGui import (
     QPolygonF,
 )
 from bisect import bisect_left, bisect_right
+import numpy as np
 from rishi.odb.geom import Rect, Point
 from rishi.odb.types import (
     dbOrientType,
@@ -210,11 +211,9 @@ class RenderThread(QThread):
             getattr(self._viewer, "_ir_drop_map_visible", False)
             and getattr(self._viewer, "_ir_drop_data", None) is not None
         )
-        if ir_drop_active:
-            ppd = getattr(self._viewer, "pixels_per_dbu", 1.0)
-            inst_limit = max(int(0.5 / max(ppd, 1e-6)), 0) if ppd > 0 else 0
-        else:
-            inst_limit = self._viewer.instanceSizeLimit()
+        # Preserve normal instanceSizeLimit() so zoomed-out views never flood drawLayer/drawInstanceShapes
+        # with hundreds of thousands of sub-5px standard cells. Progressive LOD is rendered in drawIRDropOverlay.
+        inst_limit = self._viewer.instanceSizeLimit()
 
         insts = search.searchInsts(
             block,
@@ -226,8 +225,6 @@ class RenderThread(QThread):
             show_std_cells=options.areStandardCellsVisible() or ir_drop_active,
             show_macros=options.areMacrosVisible(),
         )
-        # DEBUG
-        # print(f"DEBUG: drawChip bounds={bounds}, inst_limit={inst_limit}, found {len(insts)} insts")
 
         # 3. Draw instance outlines (L1237)
         if (options.areInstancesVisible() and options.areInstanceOutlinesVisible()) or ir_drop_active:
@@ -251,8 +248,8 @@ class RenderThread(QThread):
                     return
                 self.drawLayer(painter, block, layer, insts, bounds, gui_painter)
 
-        if self._viewer._ir_drop_map_visible and self._viewer._ir_drop_data is not None:
-            self.drawIRDropOverlay(painter, insts)
+        if ir_drop_active:
+            self.drawIRDropOverlay(painter, insts, bounds)
 
         if self._restart:
             return
@@ -272,16 +269,18 @@ class RenderThread(QThread):
         if options.areIOPinsVisible():
             self.drawIOPins(painter, block, bounds)
 
-    def drawIRDropOverlay(self, painter: QPainter, insts: List[dbInst]) -> None:
-        """Draws a distinct translucent IR-drop range color over standard-cell footprints."""
-        if not insts or getattr(self._viewer, "pixels_per_dbu", 1.0) <= 0:
+    def drawIRDropOverlay(self, painter: QPainter, insts: List[dbInst], bounds: Optional[Rect] = None) -> None:
+        """Draws IR-drop range colors over standard cells with progressive multi-resolution LOD."""
+        ppd = getattr(self._viewer, "pixels_per_dbu", 1.0)
+        if ppd <= 0:
             return
         report = getattr(self._viewer, "_ir_drop_data", None)
         if report is None:
             return
 
+        resolve_fn = getattr(self._viewer, "resolve_ir_drop_bin", None)
         name_to_bin = getattr(self._viewer, "_ir_drop_name_to_bin", None)
-        if name_to_bin is None:
+        if name_to_bin is None and resolve_fn is None:
             records = getattr(report, "records_by_instance", {})
             name_to_bin = {k: report.color_index(v[0]) for k, v in records.items()}
         leaf_to_bin = getattr(self._viewer, "_ir_drop_leaf_to_bin", {})
@@ -293,22 +292,121 @@ class RenderThread(QThread):
             pen = QPen(color.lighter(125), 0)
             pen.setCosmetic(True)
             pens.append(pen)
-            color.setAlpha(175)
+            color.setAlpha(185)
             brushes.append(QBrush(color))
 
+        # Fast Vectorized Progressive LOD path using SpatialSearch NumPy arrays
+        search = self._viewer.getSearch() if hasattr(self._viewer, "getSearch") else None
+        boxes = getattr(search, "_inst_boxes", None) if search is not None else None
+        if bounds is not None and boxes is not None and len(boxes) > 0:
+            mask = (
+                (boxes[:, 2] >= bounds.xMin())
+                & (boxes[:, 0] <= bounds.xMax())
+                & (boxes[:, 3] >= bounds.yMin())
+                & (boxes[:, 1] <= bounds.yMax())
+                & (~search._inst_is_macro)
+            )
+            is_filler = getattr(search, "_inst_is_filler", None)
+            if is_filler is not None:
+                mask &= (~is_filler)
+            vis_indices = np.flatnonzero(mask)
+            num_vis = len(vis_indices)
+            if num_vis == 0:
+                return
+
+            LOD_BUDGET = 6000
+            stride = max(1, (num_vis + LOD_BUDGET - 1) // LOD_BUDGET)
+            sampled_indices = vis_indices[::stride] if stride > 1 else vis_indices
+
+            all_insts = search._insts
+            inst_bins = getattr(self._viewer, "_ir_drop_inst_bins", None)
+            if inst_bins is None or len(inst_bins) != len(all_insts):
+                inst_bins = np.full(len(all_insts), -2, dtype=np.int8)
+                self._viewer._ir_drop_inst_bins = inst_bins
+
+            bins_to_draw: Tuple[List[int], ...] = ([], [], [], [], [])
+            for k, raw_idx in enumerate(sampled_indices):
+                if k % 2000 == 0 and self._restart:
+                    return
+                i = int(raw_idx)
+                b = int(inst_bins[i])
+                if b == -2:
+                    name = all_insts[i].getName()
+                    if resolve_fn is not None:
+                        b = resolve_fn(name)
+                    else:
+                        b_val = name_to_bin.get(name) if name_to_bin else None
+                        if b_val is None and leaf_to_bin:
+                            leaf = name.rsplit("/", 1)[-1] if "/" in name else name
+                            b_val = leaf_to_bin.get(leaf)
+                        b = b_val if b_val is not None else -1
+                    inst_bins[i] = b
+                if 0 <= b < 5:
+                    bins_to_draw[b].append(i)
+
+            painter.save()
+            if stride > 1:
+                scale = min(float(stride) ** 0.45, 6.0)
+                min_dbu = int(2.2 / max(ppd, 1e-6))
+                for b_idx in range(len(IR_DROP_PALETTE)):
+                    idx_list = bins_to_draw[b_idx]
+                    if not idx_list:
+                        continue
+                    c = QColor(IR_DROP_PALETTE[b_idx])
+                    if stride > 2:
+                        painter.setPen(Qt.NoPen)
+                        c.setAlpha(215)
+                    else:
+                        painter.setPen(pens[b_idx])
+                        c.setAlpha(195)
+                    painter.setBrush(QBrush(c))
+                    for i in idx_list:
+                        x1 = int(boxes[i, 0])
+                        y1 = int(boxes[i, 1])
+                        x2 = int(boxes[i, 2])
+                        y2 = int(boxes[i, 3])
+                        dw = max(int((x2 - x1) * scale), min_dbu)
+                        dh = max(int((y2 - y1) * scale), min_dbu)
+                        cx = (x1 + x2) >> 1
+                        cy = (y1 + y2) >> 1
+                        painter.drawRect(cx - (dw >> 1), cy - (dh >> 1), dw, dh)
+            else:
+                for b_idx in range(len(IR_DROP_PALETTE)):
+                    idx_list = bins_to_draw[b_idx]
+                    if not idx_list:
+                        continue
+                    painter.setPen(pens[b_idx])
+                    painter.setBrush(brushes[b_idx])
+                    for i in idx_list:
+                        x1 = int(boxes[i, 0])
+                        y1 = int(boxes[i, 1])
+                        x2 = int(boxes[i, 2])
+                        y2 = int(boxes[i, 3])
+                        painter.drawRect(x1, y1, x2 - x1, y2 - y1)
+            painter.restore()
+            return
+
+        # Fallback path for direct insts list (e.g. unit tests)
+        if not insts:
+            return
         painter.save()
         last_idx = None
-        for index, inst in enumerate(insts):
+        step = max(1, len(insts) // 6000)
+        for index in range(0, len(insts), step):
             if index % 2000 == 0 and self._restart:
                 break
+            inst = insts[index]
             if inst.getMaster().isMacro():
                 continue
             name = inst.getName()
-            idx = name_to_bin.get(name)
-            if idx is None and leaf_to_bin:
-                leaf = name.rsplit("/", 1)[-1] if "/" in name else name
-                idx = leaf_to_bin.get(leaf)
-            if idx is None:
+            if resolve_fn is not None:
+                idx = resolve_fn(name)
+            else:
+                idx = name_to_bin.get(name) if name_to_bin else None
+                if idx is None and leaf_to_bin:
+                    leaf = name.rsplit("/", 1)[-1] if "/" in name else name
+                    idx = leaf_to_bin.get(leaf)
+            if idx is None or idx < 0:
                 continue
             box = inst.getBBox().getBox()
             if box.area() <= 0:
@@ -406,9 +504,10 @@ class RenderThread(QThread):
         macro_pen.setCosmetic(True)
         macro_brush = QBrush(options.macroColor())
 
+        resolve_fn = getattr(self._viewer, "resolve_ir_drop_bin", None)
         if ir_drop_active:
             name_to_bin = getattr(self._viewer, "_ir_drop_name_to_bin", None)
-            if name_to_bin is None:
+            if name_to_bin is None and resolve_fn is None:
                 report = getattr(self._viewer, "_ir_drop_data", None)
                 records = getattr(report, "records_by_instance", {}) if report else {}
                 name_to_bin = {k: report.color_index(v[0]) for k, v in records.items()} if report else {}
@@ -429,6 +528,7 @@ class RenderThread(QThread):
             bin_brushes = []
 
         last_mode = None  # "macro", "cell", or ("ir_cell", bin_idx)
+        std_stride = max(1, len(insts) // 8000)
 
         for idx, inst in enumerate(insts):
             if idx % 1000 == 0 and self._restart:
@@ -458,14 +558,21 @@ class RenderThread(QThread):
             else:
                 if not show_std_cells:
                     continue
+                if std_stride > 1 and (idx % std_stride) != 0:
+                    continue
 
                 bbox = inst.getBBox().getBox()
                 if ir_drop_active:
                     name = inst.getName()
-                    bin_idx = name_to_bin.get(name)
-                    if bin_idx is None and leaf_to_bin:
-                        leaf = name.rsplit("/", 1)[-1] if "/" in name else name
-                        bin_idx = leaf_to_bin.get(leaf)
+                    if resolve_fn is not None:
+                        bin_idx = resolve_fn(name)
+                    else:
+                        bin_idx = name_to_bin.get(name) if name_to_bin else None
+                        if bin_idx is None and leaf_to_bin:
+                            leaf = name.rsplit("/", 1)[-1] if "/" in name else name
+                            bin_idx = leaf_to_bin.get(leaf)
+                    if bin_idx is not None and bin_idx < 0:
+                        bin_idx = None
 
                     current_mode = ("ir_cell", bin_idx)
                     if last_mode != current_mode:

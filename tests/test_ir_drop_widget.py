@@ -488,9 +488,57 @@ def test_ir_drop_drawchip_queries_standard_cells(qapp):
     renderer.drawChip(painter, FakeBlock(), Rect(0, 0, 1000, 1000), gui_painter)
     painter.end()
 
-    # Verify searchInsts was called with standard cells forced visible and relaxed size limit
+    # Verify searchInsts was called with standard cells forced visible while preserving instanceSizeLimit
+    # so zoomed-out views do not flood drawLayer with hundreds of thousands of sub-5px standard cells.
     assert viewer._search.last_query["show_std_cells"] is True
-    # At ppd=0.002, 0.5 / 0.002 = 250 DBU, much smaller than viewer.instanceSizeLimit() (5000)
-    assert viewer._search.last_query["min_size"] == 250
+    assert viewer._search.last_query["min_size"] == 5000
     # drawInstanceOutlines must have been invoked
-    renderer.drawInstanceOutlines.assert_called_once()
+    renderer.drawInstanceOutlines.assert_called_once()
+
+
+def test_ir_drop_progressive_lod_overlay_scales_from_zoom_out_to_zoom_in(qapp):
+    import numpy as np
+
+    report = IRDropReportData(
+        records_by_instance={"top/u_0": (20.0, "INV_X1"), "top/u_1": (120.0, "BUF_X4")},
+        ordered_instances=["top/u_1", "top/u_0"],
+        minimum_mv=0.0,
+        maximum_mv=140.0,
+        bins=[IRDropBin(0.0, 140.0, 2)],
+    )
+
+    class FakeInst:
+        def __init__(self, name):
+            self._name = name
+        def getName(self):
+            return self._name
+
+    class FakeSearch:
+        def __init__(self):
+            self._insts = [FakeInst("top/u_0"), FakeInst("top/u_1")]
+            self._inst_boxes = np.array([[2, 2, 10, 10], [14, 2, 22, 10]], dtype=np.int32)
+            self._inst_is_macro = np.array([False, False], dtype=bool)
+            self._inst_is_filler = np.array([False, False], dtype=bool)
+
+    viewer = LayoutViewer()
+    viewer._search = FakeSearch()
+    viewer.setIRDropData(report)
+    viewer.setIRDropMapVisible(True)
+    viewer.pixels_per_dbu = 1.0
+
+    renderer = RenderThread(viewer)
+    img = QImage(30, 20, QImage.Format_ARGB32_Premultiplied)
+    bg = QColor("#101010")
+    img.fill(bg)
+    painter = QPainter(img)
+    renderer.drawIRDropOverlay(painter, [], bounds=Rect(0, 0, 30, 20))
+    painter.end()
+
+    # Both standard cells in bounds are colored via the fast vectorized LOD path
+    assert img.pixelColor(6, 6) != bg
+    assert img.pixelColor(18, 6) != bg
+    # Instance bin cache array was populated
+    assert viewer._ir_drop_inst_bins is not None
+    assert int(viewer._ir_drop_inst_bins[0]) >= 0
+    assert int(viewer._ir_drop_inst_bins[1]) >= 0
+    viewer.close()

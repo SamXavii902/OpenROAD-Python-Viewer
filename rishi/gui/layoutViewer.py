@@ -115,6 +115,8 @@ class LayoutViewer(QWidget):
         self._instance_resolve_cache: Dict[str, Any] = {}
         self._ir_drop_name_to_bin: Dict[str, int] = {}
         self._ir_drop_leaf_to_bin: Dict[str, int] = {}
+        self._ir_drop_inst_bins: Optional[np.ndarray] = None
+        self._ir_drop_prefixes: Tuple[str, ...] = ()
 
         # 60 FPS Vector Animation Overlay Engine
         self._anim_timer = QTimer(self)
@@ -181,11 +183,11 @@ class LayoutViewer(QWidget):
         self._ir_drop_grid_drop = None
         self._ir_drop_heatmap_attempted = False
         self._instance_resolve_cache = {}
+        self._ir_drop_inst_bins = None
         if chip and chip.getTech():
             self._options.tech_init(chip.getTech())
         if chip and chip.getBlock():
             self._search.build(chip.getBlock(), callback=progress_callback)
-            self._ensure_alias_maps()
             self._build_ir_drop_color_cache()
             self.fit()
         else:
@@ -573,6 +575,8 @@ class LayoutViewer(QWidget):
                         self._timing_connectivity.setdefault(leaf_n, []).append(pt_next)
 
     def setIRDropData(self, report_data: Optional[Any]) -> None:
+        if self._ir_drop_data is report_data and (report_data is None or self._ir_drop_name_to_bin or self._ir_drop_prefixes):
+            return
         self._ir_drop_data = report_data
         self._ir_drop_heatmap_image = None
         self._ir_drop_heatmap_core = None
@@ -580,13 +584,18 @@ class LayoutViewer(QWidget):
         self._ir_drop_grid_inst = None
         self._ir_drop_heatmap_attempted = False
         self._instance_resolve_cache = {}
+        self._ir_drop_inst_bins = None
         self._build_ir_drop_color_cache()
-        self.fullRepaint()
+        if self._ir_drop_map_visible:
+            self.fullRepaint()
         self.update()
 
     def setIRDropMapVisible(self, visible: bool) -> None:
-        self._ir_drop_map_visible = bool(visible)
-        if visible and self._ir_drop_data is not None:
+        new_vis = bool(visible)
+        if self._ir_drop_map_visible == new_vis:
+            return
+        self._ir_drop_map_visible = new_vis
+        if new_vis and self._ir_drop_data is not None and not self._ir_drop_name_to_bin and not self._ir_drop_prefixes:
             self._build_ir_drop_color_cache()
         self.fullRepaint()
         self.update()
@@ -718,10 +727,12 @@ class LayoutViewer(QWidget):
         return candidates[0]
 
     def _build_ir_drop_color_cache(self) -> None:
-        """Precomputes fast O(1) instance-name to IR-drop bin mapping for high-speed cell rendering."""
+        """Initializes fast O(1) instance-name to IR-drop bin mapping without blocking the UI thread."""
+        self._ir_drop_inst_bins = None
         if self._ir_drop_data is None:
             self._ir_drop_name_to_bin = {}
             self._ir_drop_leaf_to_bin = {}
+            self._ir_drop_prefixes = ()
             return
 
         report = self._ir_drop_data
@@ -729,77 +740,122 @@ class LayoutViewer(QWidget):
         if not records:
             self._ir_drop_name_to_bin = {}
             self._ir_drop_leaf_to_bin = {}
+            self._ir_drop_prefixes = ()
+            return
+
+        # Discover hierarchy prefixes from a tiny sample (first 50 keys) in <0.05ms
+        prefixes: List[str] = []
+        seen_pref = set()
+        for idx, inst_name in enumerate(records.keys()):
+            if idx >= 50:
+                break
+            if "/" in inst_name:
+                pref = inst_name.split("/", 1)[0] + "/"
+                if pref not in seen_pref:
+                    seen_pref.add(pref)
+                    prefixes.append(pref)
+        self._ir_drop_prefixes = tuple(prefixes)
+
+        # For large industrial reports (>5,000 cells), use 100% lazy on-demand memoization
+        # so toggling or loading the IR-drop map takes 0ms on the main GUI thread.
+        if len(records) > 5000:
+            self._ir_drop_name_to_bin = {}
+            self._ir_drop_leaf_to_bin = {}
             return
 
         name_to_bin: Dict[str, int] = {}
         leaf_to_bin: Dict[str, int] = {}
 
-        # 1. Map report instances and common variations
         for inst_name, rec in records.items():
             drop_mv = rec[0]
             bin_idx = report.color_index(drop_mv)
-
             name_to_bin[inst_name] = bin_idx
 
-            # Escaped bracket variants
             if "[" in inst_name and r"\[" not in inst_name:
-                esc = inst_name.replace("[", r"\[").replace("]", r"\]")
-                name_to_bin[esc] = bin_idx
+                name_to_bin[inst_name.replace("[", r"\[").replace("]", r"\]")] = bin_idx
             elif r"\[" in inst_name:
-                unesc = inst_name.replace(r"\[", "[").replace(r"\]", "]")
-                name_to_bin[unesc] = bin_idx
+                name_to_bin[inst_name.replace(r"\[", "[").replace(r"\]", "]")] = bin_idx
 
-            # Hierarchical dot to slash
             if "." in inst_name and "/" not in inst_name:
                 slash_name = inst_name.replace(".", "/")
                 name_to_bin[slash_name] = bin_idx
-                if "[" in slash_name:
-                    name_to_bin[slash_name.replace("[", r"\[").replace("]", r"\]")] = bin_idx
 
-            # Top-level prefix stripped variant (strip first component)
             if "/" in inst_name:
                 sub = inst_name.split("/", 1)[1]
                 name_to_bin.setdefault(sub, bin_idx)
-                if "[" in sub and r"\[" not in sub:
-                    name_to_bin.setdefault(sub.replace("[", r"\[").replace("]", r"\]"), bin_idx)
-                elif r"\[" in sub:
-                    name_to_bin.setdefault(sub.replace(r"\[", "[").replace(r"\]", "]"), bin_idx)
 
-            # Leaf name
             leaf = inst_name.rsplit("/", 1)[-1] if "/" in inst_name else inst_name
             leaf_to_bin.setdefault(leaf, bin_idx)
-            if "[" in leaf and r"\[" not in leaf:
-                leaf_to_bin.setdefault(leaf.replace("[", r"\[").replace("]", r"\]"), bin_idx)
-            elif r"\[" in leaf:
-                leaf_to_bin.setdefault(leaf.replace(r"\[", "[").replace(r"\]", "]"), bin_idx)
-
-        # 2. Map loaded DEF instances directly using fast lookup
-        if self.hasDesign():
-            chip = self.getChip() if hasattr(self, "getChip") and self.getChip() is not None else getattr(self, "_chip", None)
-            block = chip.getBlock() if chip else None
-            if block is not None:
-                inst_map = getattr(block, "_insts_by_name", None)
-                find_fn = inst_map.get if isinstance(inst_map, dict) else (block.findInst if hasattr(block, "findInst") else None)
-                if find_fn:
-                    for inst_name, rec in records.items():
-                        bin_idx = report.color_index(rec[0])
-                        inst = find_fn(inst_name)
-                        if inst is not None:
-                            name_to_bin[inst.getName()] = bin_idx
-                        else:
-                            clean = inst_name.split(":", 1)[0] if ":" in inst_name else inst_name
-                            inst = find_fn(clean)
-                            if inst is None and "/" in clean:
-                                inst = find_fn(clean.split("/", 1)[1])
-                            if inst is None and "[" in clean:
-                                inst = find_fn(clean.replace("[", r"\[").replace("]", r"\]"))
-                            elif inst is None and r"\[" in clean:
-                                inst = find_fn(clean.replace(r"\[", "[").replace(r"\]", "]"))
-                            if inst is not None:
-                                name_to_bin[inst.getName()] = bin_idx
 
         self._ir_drop_name_to_bin = name_to_bin
         self._ir_drop_leaf_to_bin = leaf_to_bin
+
+    def resolve_ir_drop_bin(self, name: str) -> int:
+        """Fast O(1) memoized lookup returning palette bin 0..4, or -1 if instance has no IR-drop record."""
+        cached = self._ir_drop_name_to_bin.get(name)
+        if cached is not None:
+            return cached
+
+        report = self._ir_drop_data
+        if report is None:
+            return -1
+        records = getattr(report, "records_by_instance", None)
+        if not records:
+            return -1
+
+        rec = records.get(name)
+        if rec is None:
+            if r"\[" in name:
+                unesc = name.replace(r"\[", "[").replace(r"\]", "]")
+                rec = records.get(unesc)
+            elif "[" in name:
+                esc = name.replace("[", r"\[").replace("]", r"\]")
+                rec = records.get(esc)
+            else:
+                unesc = None
+                esc = None
+
+            if rec is None and "/" in name:
+                sub = name.split("/", 1)[1]
+                rec = records.get(sub)
+                if rec is None:
+                    if r"\[" in sub:
+                        rec = records.get(sub.replace(r"\[", "[").replace(r"\]", "]"))
+                    elif "[" in sub:
+                        rec = records.get(sub.replace("[", r"\[").replace("]", r"\]"))
+
+            if rec is None and self._ir_drop_prefixes:
+                for pref in self._ir_drop_prefixes:
+                    rec = records.get(pref + name)
+                    if rec is not None:
+                        break
+                    if unesc is not None:
+                        rec = records.get(pref + unesc)
+                        if rec is not None:
+                            break
+                    elif esc is not None:
+                        rec = records.get(pref + esc)
+                        if rec is not None:
+                            break
+
+            if rec is None and "/" in name:
+                leaf = name.rsplit("/", 1)[-1]
+                rec = records.get(leaf)
+                if rec is None and self._ir_drop_leaf_to_bin:
+                    b = self._ir_drop_leaf_to_bin.get(leaf, -1)
+                    self._ir_drop_name_to_bin[name] = b
+                    return b
+
+        if rec is not None:
+            b = report.color_index(rec[0])
+        elif self._ir_drop_leaf_to_bin:
+            leaf = name.rsplit("/", 1)[-1] if "/" in name else name
+            b = self._ir_drop_leaf_to_bin.get(leaf, -1)
+        else:
+            b = -1
+
+        self._ir_drop_name_to_bin[name] = b
+        return b
 
 
 
@@ -1218,8 +1274,19 @@ class LayoutViewer(QWidget):
         inst_map = getattr(block, "_insts_by_name", None)
         find_fn = inst_map.get if isinstance(inst_map, dict) else (block.findInst if hasattr(block, "findInst") else None)
 
-        # Iterate over records (typically 2k-50k instances in report, instead of 500k in DEF)
-        for inst_name, rec in records.items():
+        # Bound iteration to at most 4,000 sampled instances so this never blocks the UI thread
+        ordered = getattr(report, "ordered_instances", None)
+        if ordered and len(ordered) > 4000:
+            step = max(1, len(ordered) // 4000)
+            sample_iter = ((k, records[k]) for k in ordered[::step] if k in records)
+        elif len(records) > 4000:
+            keys = list(records.keys())
+            step = max(1, len(keys) // 4000)
+            sample_iter = ((k, records[k]) for k in keys[::step])
+        else:
+            sample_iter = records.items()
+
+        for inst_name, rec in sample_iter:
             inst = find_fn(inst_name) if find_fn else None
             if inst is None and find_fn:
                 clean = inst_name.split(":", 1)[0] if ":" in inst_name else inst_name
@@ -1306,31 +1373,9 @@ class LayoutViewer(QWidget):
         self._ir_drop_inv_bh = inv_bh
 
     def _draw_ir_drop_heatmap(self, painter: QPainter) -> None:
-        """Renders continuous 2D voltage-drop heatmap and HUD legend card."""
+        """Renders the lightweight HUD legend card for the IR-drop cell visualizer."""
         if not self._ir_drop_map_visible or self._ir_drop_data is None or not self.hasDesign():
             return
-        if self._ir_drop_heatmap_image is None and not getattr(self, "_ir_drop_heatmap_attempted", False):
-            self._ensure_ir_drop_heatmap()
-
-        ppd = getattr(self, "pixels_per_dbu", 1.0)
-        # Draw full-chip heatmap raster only when extremely zoomed out (cells < 1.5 screen pixels)
-        # When cells are viewable, the standard cells themselves are individually colored!
-        if (
-            ppd * 1400.0 < 1.5
-            and self._ir_drop_heatmap_image is not None
-            and not self._ir_drop_heatmap_image.isNull()
-            and self._ir_drop_heatmap_core is not None
-        ):
-            painter.save()
-            p1 = self.dbuPointToScreen(Point(self._ir_drop_heatmap_core.xMin(), self._ir_drop_heatmap_core.yMax()))
-            p2 = self.dbuPointToScreen(Point(self._ir_drop_heatmap_core.xMax(), self._ir_drop_heatmap_core.yMin()))
-            w = p2.x() - p1.x()
-            h = p2.y() - p1.y()
-            if w > 1 and h > 1:
-                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-                painter.drawImage(QRectF(p1.x(), p1.y(), w, h), self._ir_drop_heatmap_image)
-            painter.restore()
-
         self._draw_ir_drop_hud_legend(painter)
 
     def _draw_ir_drop_hud_legend(self, painter: QPainter) -> None:
@@ -1398,30 +1443,54 @@ class LayoutViewer(QWidget):
         """Returns the local IR drop in mV and instance name at the given DBU point, or None."""
         if self._ir_drop_data is None:
             return None
-        if getattr(self, "_ir_drop_grid_drop", None) is None and not getattr(self, "_ir_drop_heatmap_attempted", False):
-            self._ensure_ir_drop_heatmap()
 
-        # First check if directly hitting a placed instance
-        inst = self._hit_test_instance(pt_dbu)
+        records = getattr(self._ir_drop_data, "records_by_instance", None)
+        if not records:
+            return None
+
+        # 1. Fast vectorized exact point hit-test against SpatialSearch boxes
+        inst = None
+        boxes = getattr(self._search, "_inst_boxes", None)
+        if boxes is not None and len(boxes) > 0:
+            px, py = pt_dbu.x, pt_dbu.y
+            mask = (
+                (boxes[:, 0] <= px)
+                & (boxes[:, 2] >= px)
+                & (boxes[:, 1] <= py)
+                & (boxes[:, 3] >= py)
+                & (~self._search._inst_is_macro)
+            )
+            hits = np.flatnonzero(mask)
+            if len(hits) > 0:
+                inst = self._search._insts[int(hits[0])]
+        elif self.pixels_per_dbu * 1400.0 >= 2.0:
+            inst = self._hit_test_instance(pt_dbu)
+
         if inst is not None:
             name = inst.getName()
-            records = self._ir_drop_data.records_by_instance
             rec = records.get(name)
             if rec is None and r"\[" in name:
                 rec = records.get(name.replace(r"\[", "[").replace(r"\]", "]"))
-            if rec is None and "[" in name:
+            elif rec is None and "[" in name:
                 rec = records.get(name.replace("[", r"\[").replace("]", r"\]"))
-            if rec is None and self._leaf_map:
+            if rec is None and "/" in name:
+                rec = records.get(name.split("/", 1)[1])
+            if rec is None and self._ir_drop_prefixes:
+                for pref in self._ir_drop_prefixes:
+                    rec = records.get(pref + name)
+                    if rec is not None:
+                        break
+            if rec is None and "/" in name:
                 leaf = name.rsplit("/", 1)[-1]
                 rec = records.get(leaf)
-                if rec is None and r"\[" in leaf:
-                    rec = records.get(leaf.replace(r"\[", "[").replace(r"\]", "]"))
-                elif rec is None and "[" in leaf:
-                    rec = records.get(leaf.replace("[", r"\[").replace("]", r"\]"))
             if rec is not None:
                 return (rec[0], inst.getName())
 
-        # Fallback to spatial grid
+        # 2. Fallback to spatial grid only for small reports or if already computed
+        if getattr(self, "_ir_drop_grid_drop", None) is None and not getattr(self, "_ir_drop_heatmap_attempted", False):
+            if len(records) <= 4000:
+                self._ensure_ir_drop_heatmap()
+
         if (
             hasattr(self, "_ir_drop_grid_drop")
             and self._ir_drop_grid_drop is not None
