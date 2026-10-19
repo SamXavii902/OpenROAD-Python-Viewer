@@ -122,7 +122,12 @@ class IRDropParser:
                         if ":" in instance:
                             instance = instance.split(":", 1)[0]
                         inst_upper = instance.upper()
-                        for pin_suffix in ("/VDD", "/VSS", "/GND", "/VPWR", "/VGND", "/VDDIO", "/VSSIO", "/VDD_CORE", "/VSS_CORE"):
+                        for pin_suffix in (
+                            "/VDD", "/VSS", "/GND", "/VPWR", "/VGND", "/VDDIO", "/VSSIO",
+                            "/VDD_CORE", "/VSS_CORE", "/VDDS", "/VDDC", "/TVDD", "/VVDD",
+                            "/VVSS", "/VDDG", "/VSSG", "/VNW", "/VPW", "/VNB", "/VPB",
+                            "/PB", "/NB", "/VDD1", "/VSS1", "/VDD2", "/VSS2", "/AVDD", "/AVSS",
+                        ):
                             if inst_upper.endswith(pin_suffix) and len(instance) > len(pin_suffix):
                                 instance = instance[:-len(pin_suffix)]
                                 break

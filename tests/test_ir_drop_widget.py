@@ -614,4 +614,85 @@ def test_ir_drop_large_report_leaf_and_zoomed_out_rendering(qapp):
     )
     assert colored_pixels > 100
     viewer.close()
+
+
+def test_resolve_instance_complex_eda_naming_and_mbff(qapp):
+    viewer = LayoutViewer()
+    block = MagicMock()
+
+    def make_inst(name, placed=True):
+        m = MagicMock()
+        m.getName.return_value = name
+        m.isPlaced.return_value = placed
+        return m
+
+    inst_bus = make_inst(r"u_eth/U_mtl_rx/rd_data_1d_reg\[10\]")
+    inst_mbff_def = make_inst(r"u_eth/u_mac/CDN_MBIT_cnt_reg\[0\]_MB_cnt_reg\[1\]")
+    inst_single_flop = make_inst("u_eth/u_pcs/rx_state_regx3x")
+    inst_stage = make_inst("u_eth/u_cts/prects_FE_OFC123_n45_dup")
+    inst_rx_unplaced = make_inst("u_eth/u_rx/pkt_valid_reg[0]", placed=False)
+    inst_tx_placed = make_inst("u_eth/u_tx/pkt_valid_reg[0]", placed=True)
+    inst_rx_placed = make_inst("u_eth/u_rx_core/pkt_len_reg[0]", placed=True)
+    inst_tx_len = make_inst("u_eth/u_tx_core/pkt_len_reg[0]", placed=True)
+
+    all_insts = [
+        inst_bus,
+        inst_mbff_def,
+        inst_single_flop,
+        inst_stage,
+        inst_rx_unplaced,
+        inst_tx_placed,
+        inst_rx_placed,
+        inst_tx_len,
+    ]
+    inst_map = {i.getName(): i for i in all_insts}
+    block.findInst.side_effect = lambda n: inst_map.get(n)
+    block.getInsts.return_value = all_insts
+    block._insts_by_name = inst_map
+
+    chip = MagicMock()
+    chip.getBlock.return_value = block
+    viewer._chip = chip
+
+    # 1. Multi-level top prefix + x<N>x bus style vs DEF \[N\] style + FD-SOI /VDDS pin
+    assert (
+        viewer.resolve_instance("ETH_FLEX_SS/u_switch/u_eth/U_mtl_rx/rd_data_1d_regx10x/VDDS")
+        is inst_bus
+    )
+    # 2. Report has individual bus-style flop cnt_regx1x, DEF has merged CDN_MBIT_cnt_reg\[0\]_MB_cnt_reg\[1\]
+    assert (
+        viewer.resolve_instance("ETH_FLEX_SS/u_eth/u_mac/cnt_regx1x")
+        is inst_mbff_def
+    )
+    # 3. Report has merged CDN_MBIT_ name, DEF has individual flop rx_state_regx3x
+    assert (
+        viewer.resolve_instance("ETH_FLEX_SS/u_eth/u_pcs/CDN_MBIT_rx_state_reg[2]_MB_rx_state_reg[3]")
+        is inst_single_flop
+    )
+    # 4. Stage prefix / clone suffix discrepancy between report and DEF
+    assert (
+        viewer.resolve_instance("ETH_FLEX_SS/u_eth/u_cts/cts_FE_OFC123_n45")
+        is inst_stage
+    )
+    # 5. Unrecognized signal pin suffix (/Q) stripped automatically
+    assert (
+        viewer.resolve_instance("u_eth/U_mtl_rx/rd_data_1d_reg[10]/Q")
+        is inst_bus
+    )
+    # 6. Disambiguation prefers placed instance and matches immediate parent hierarchy suffix
+    assert (
+        viewer.resolve_instance("CHIP_TOP/ETH_FLEX_SS/u_eth/u_rx/pkt_valid_reg[0]")
+        is inst_tx_placed
+    )
+    assert (
+        viewer.resolve_instance("CHIP_TOP/ETH_FLEX_SS/u_eth/u_rx_core/pkt_len_regx0x")
+        is inst_rx_placed
+    )
+    assert (
+        viewer.resolve_instance("CHIP_TOP/ETH_FLEX_SS/u_eth/u_tx_core/pkt_len_regx0x")
+        is inst_tx_len
+    )
+
+    viewer.close()
+
 

@@ -370,6 +370,8 @@ class DefParser:
                             inst.setPlacementStatus(dbPlacementStatus.FIXED)
                         elif status_str == "COVER":
                             inst.setPlacementStatus(dbPlacementStatus.COVER)
+                        elif status_str == "FIRM":
+                            inst.setPlacementStatus(dbPlacementStatus.FIRM)
 
                         # Check for ( x y ) orient
                         if idx + 4 < len(tokens) and tokens[idx + 1] == "(":

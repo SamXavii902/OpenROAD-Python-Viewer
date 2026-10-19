@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QThread, Signal
@@ -399,12 +400,12 @@ class IRDropWidget(QWidget):
         self._tabs = QTabWidget()
         self._instance_table = self._create_table(("Drop (mV)", "Cell Type", "Instance Name"))
         self._instance_table.cellClicked.connect(self._on_instance_row_clicked)
-        self._instance_table.cellDoubleClicked.connect(self._on_instance_row_clicked)
+        self._instance_table.cellDoubleClicked.connect(self._on_instance_row_double_clicked)
         self._tabs.addTab(self._instance_table, "Hotspots")
 
         self._cell_table = self._create_table(("Cell Type", "Instances", "Mean (mV)", "Worst (mV)", "Worst Instance"))
         self._cell_table.cellClicked.connect(self._on_cell_type_row_clicked)
-        self._cell_table.cellDoubleClicked.connect(self._on_cell_type_row_clicked)
+        self._cell_table.cellDoubleClicked.connect(self._on_cell_type_row_double_clicked)
         self._tabs.addTab(self._cell_table, "Cell Types")
         root.addWidget(self._tabs, 1)
 
@@ -759,7 +760,17 @@ class IRDropWidget(QWidget):
         if item is not None:
             inst_name = str(item.data(Qt.UserRole) or item.text())
             if inst_name:
+                self._last_nav_inst = (inst_name, time.monotonic())
                 self.instance_selected.emit(inst_name)
+
+    def _on_instance_row_double_clicked(self, row: int, column: int) -> None:
+        item = self._instance_table.item(row, 2)
+        if item is not None:
+            inst_name = str(item.data(Qt.UserRole) or item.text())
+            last = getattr(self, "_last_nav_inst", None)
+            if last and last[0] == inst_name and (time.monotonic() - last[1]) < 0.35:
+                return
+        self._on_instance_row_clicked(row, column)
 
     def _on_cell_type_row_clicked(self, row: int, _column: int) -> None:
         """Navigates layout canvas to worst hotspot instance for the selected cell type."""
@@ -767,7 +778,17 @@ class IRDropWidget(QWidget):
         if item is not None:
             inst_name = str(item.data(Qt.UserRole) or item.text())
             if inst_name:
+                self._last_nav_inst = (inst_name, time.monotonic())
                 self.instance_selected.emit(inst_name)
+
+    def _on_cell_type_row_double_clicked(self, row: int, column: int) -> None:
+        item = self._cell_table.item(row, 4)
+        if item is not None:
+            inst_name = str(item.data(Qt.UserRole) or item.text())
+            last = getattr(self, "_last_nav_inst", None)
+            if last and last[0] == inst_name and (time.monotonic() - last[1]) < 0.35:
+                return
+        self._on_cell_type_row_clicked(row, column)
 
     def _previous_page(self) -> None:
         if self._page > 0:

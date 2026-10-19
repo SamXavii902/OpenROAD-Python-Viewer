@@ -1,6 +1,7 @@
 """LayoutViewer widget ported from RISHI gui/src/layoutViewer.cpp with interactive measurement ruler and object highlighting."""
 
 import math
+import re
 import time
 from typing import Optional, Dict, List, Tuple, Callable, Any
 from PySide6.QtWidgets import QWidget
@@ -30,6 +31,43 @@ from rishi.irdrop.report import IR_DROP_PALETTE
 
 
 kZoomScaleFactor = 1.25
+
+_BUS_CANON_RE = re.compile(
+    r"\\?\[(\d+)\\?\]|(?<=[A-Za-z0-9_])x(\d+)x|_(\d+)_|__(\d+)(?![0-9])"
+)
+_STAGE_PREFIX_RE = re.compile(
+    r"^(?:prects_|postcts_|cts_|postroute_|route_|place_|opt_)+",
+    re.IGNORECASE,
+)
+_STAGE_SUFFIX_RE = re.compile(
+    r"(?:_dup\d*|_clone\d*)$",
+    re.IGNORECASE,
+)
+_PIN_SUFFIXES = (
+    "/VDD", "/VSS", "/GND", "/VPWR", "/VGND", "/VDDIO", "/VSSIO",
+    "/VDD_CORE", "/VSS_CORE", "/VDDS", "/VDDC", "/TVDD", "/VVDD",
+    "/VVSS", "/VDDG", "/VSSG", "/VNW", "/VPW", "/VNB", "/VPB",
+    "/PB", "/NB", "/VDD1", "/VSS1", "/VDD2", "/VSS2", "/AVDD", "/AVSS",
+)
+
+
+def _canonicalize_bus(text: str) -> str:
+    """Normalizes bus bit naming styles ([0], \\[0\\], x0x, _0_, __0) to canonical [0]."""
+    if not text or not any(ch.isdigit() for ch in text):
+        return text
+    return _BUS_CANON_RE.sub(
+        lambda m: f"[{m.group(1) or m.group(2) or m.group(3) or m.group(4)}]",
+        text,
+    )
+
+
+def _strip_stage_affixes(leaf: str) -> str:
+    """Strips P&R optimization stage prefixes (prects_, cts_, route_, opt_) and clone suffixes (_dup)."""
+    if not leaf:
+        return leaf
+    s = _STAGE_PREFIX_RE.sub("", leaf)
+    s = _STAGE_SUFFIX_RE.sub("", s)
+    return s if s else leaf
 
 
 class LayoutViewer(QWidget):
@@ -311,6 +349,9 @@ class LayoutViewer(QWidget):
         new_shift_y = int(screen_pt.y() + focus_dbu.y * new_ppd)
         self.centering_shift = QPoint(new_shift_x, new_shift_y)
         self._pan_offset = QPoint(0, 0)
+        w = max(self.width(), 100)
+        h = max(self.height(), 100)
+        self._center = self.screenPointToDBU(QPoint(w // 2, h // 2))
 
         # Instant 60 FPS visual feedback via scaled pixmap blit
         self.update()
@@ -331,9 +372,31 @@ class LayoutViewer(QWidget):
 
     def zoomTo(self, rect: Rect, animate: bool = False) -> None:
         """Zooms and centers viewport on the specified DBU rectangle with optional kinetic glide."""
-        if not self.hasDesign() or rect.dx() <= 0 or rect.dy() <= 0:
+        if not self.hasDesign() or rect is None:
             return
-        padded = self.getPaddedRect(rect, factor=0.3)
+        if rect.dx() <= 0 or rect.dy() <= 0:
+            c_pt = rect.center()
+            half = 2000
+            rect = Rect(c_pt.x - half, c_pt.y - half, c_pt.x + half, c_pt.y + half)
+
+        # Ensure a comfortable minimum framing window when zooming to a single small standard cell
+        die = self.getBounds()
+        die_w = die.dx() if hasattr(die, "dx") and isinstance(die.dx(), (int, float)) else 0
+        die_h = die.dy() if hasattr(die, "dy") and isinstance(die.dy(), (int, float)) else 0
+        if die_w > 20000 and die_h > 20000 and (rect.dx() < 12000 or rect.dy() < 12000):
+            c_pt = rect.center()
+            span_w = max(rect.dx() * 4, min(12000, int(die_w // 4)))
+            span_h = max(rect.dy() * 4, min(12000, int(die_h // 4)))
+            frame_rect = Rect(
+                c_pt.x - span_w // 2,
+                c_pt.y - span_h // 2,
+                c_pt.x + span_w // 2,
+                c_pt.y + span_h // 2,
+            )
+        else:
+            frame_rect = rect
+
+        padded = self.getPaddedRect(frame_rect, factor=0.3)
         w = max(self.width(), 100)
         h = max(self.height(), 100)
         new_ppd = self.computePixelsPerDBU(QSize(w, h), padded)
@@ -341,6 +404,7 @@ class LayoutViewer(QWidget):
         target_center = rect.center()
 
         if not animate or not self.isVisible() or self.pixels_per_dbu <= 0:
+            self._gliding = False
             self.pixels_per_dbu = new_ppd
             self._center = target_center
             cx = w / 2.0 - target_center.x * new_ppd
@@ -351,8 +415,10 @@ class LayoutViewer(QWidget):
             self.fullRepaint()
             return
 
-        # Start smooth 280ms kinetic camera glide
-        self._glide_src_center = Point(self._center.x, self._center.y)
+        # Synchronize starting center from actual current viewport center before gliding
+        curr_screen_center = self.screenPointToDBU(QPoint(w // 2, h // 2))
+        self._center = curr_screen_center
+        self._glide_src_center = Point(curr_screen_center.x, curr_screen_center.y)
         self._glide_dst_center = target_center
         self._glide_src_ppd = self.pixels_per_dbu
         self._glide_dst_ppd = new_ppd
@@ -506,7 +572,7 @@ class LayoutViewer(QWidget):
         self.update()
 
     def _ensure_alias_maps(self) -> None:
-        """Builds on-demand fast indexes for exact, multi-bit, and leaf-level instances."""
+        """Builds on-demand fast indexes for exact, multi-bit, bus-canonicalized, and leaf-level instances."""
         if getattr(self, "_mbit_alias", None) is not None and getattr(self, "_mbit_leaf_map", None) is not None:
             return
         self._mbit_alias = {}
@@ -518,23 +584,42 @@ class LayoutViewer(QWidget):
         inst_dict = getattr(block, "_insts_by_name", None)
         inst_items = inst_dict.items() if isinstance(inst_dict, dict) else [(inst.getName(), inst) for inst in block.getInsts()]
         for name, inst in inst_items:
-            # Leaf index
-            leaf = name.rsplit("/", 1)[-1] if "/" in name else name
-            self._leaf_map.setdefault(leaf, []).append(inst)
+            norm_name = name.replace(r"\/", "/") if "\\" in name else name
+            if "/" in norm_name:
+                parent, leaf = norm_name.rsplit("/", 1)
+                prefix = f"{parent}/"
+            else:
+                prefix = ""
+                leaf = norm_name
 
-            # Multi-bit CDN_MBIT_ index
-            if "CDN_MBIT_" in name:
-                if "/" in name:
-                    parent, base = name.rsplit("/", 1)
-                    prefix = f"{parent}/"
-                else:
-                    prefix = ""
-                    base = name
-                if "CDN_MBIT_" in base:
-                    mbit_part = base.split("CDN_MBIT_", 1)[1]
-                    for sub in mbit_part.split("_MB_"):
-                        self._mbit_alias[f"{prefix}{sub}"] = inst
-                        self._mbit_leaf_map.setdefault(sub, []).append(inst)
+            self._leaf_map.setdefault(leaf, []).append(inst)
+            leaf_unesc = leaf.replace(r"\[", "[").replace(r"\]", "]") if "\\" in leaf else leaf
+            if leaf_unesc != leaf:
+                self._leaf_map.setdefault(leaf_unesc, []).append(inst)
+
+            leaf_bus = _canonicalize_bus(leaf_unesc)
+            if leaf_bus != leaf_unesc and leaf_bus != leaf:
+                self._leaf_map.setdefault(leaf_bus, []).append(inst)
+
+            leaf_stage = _strip_stage_affixes(leaf_bus)
+            if leaf_stage != leaf_bus:
+                self._leaf_map.setdefault(leaf_stage, []).append(inst)
+
+            # Multi-bit CDN_MBIT_ / _MB_ index
+            if "CDN_MBIT_" in leaf_unesc or "_MB_" in leaf_unesc:
+                mbit_part = leaf_unesc.split("CDN_MBIT_", 1)[1] if "CDN_MBIT_" in leaf_unesc else leaf_unesc
+                for sub in mbit_part.split("_MB_"):
+                    if not sub:
+                        continue
+                    self._mbit_alias[f"{prefix}{sub}"] = inst
+                    self._mbit_leaf_map.setdefault(sub, []).append(inst)
+                    sub_bus = _canonicalize_bus(sub)
+                    if sub_bus != sub:
+                        self._mbit_alias[f"{prefix}{sub_bus}"] = inst
+                        self._mbit_leaf_map.setdefault(sub_bus, []).append(inst)
+                    sub_stage = _strip_stage_affixes(sub_bus)
+                    if sub_stage != sub_bus:
+                        self._mbit_leaf_map.setdefault(sub_stage, []).append(inst)
 
     def _get_mbit_alias(self) -> Dict[str, Any]:
         """Backward-compatible accessor for multi-bit mapping."""
@@ -604,8 +689,8 @@ class LayoutViewer(QWidget):
     def isIRDropMapVisible(self) -> bool:
         return self._ir_drop_map_visible and self._ir_drop_data is not None
 
-    def resolve_instance(self, instance_name: str) -> Optional[Any]:
-        """Resolves an instance by name across DEF naming discrepancies (escapes, prefixes, pins, leaf)."""
+    def resolve_instance(self, instance_name: str, _allow_pin_strip: bool = True) -> Optional[Any]:
+        """Resolves an instance by name across DEF naming discrepancies (escapes, prefixes, MBFFs, buses, pins, leaf)."""
         if not instance_name or not self.hasDesign():
             return None
 
@@ -622,18 +707,25 @@ class LayoutViewer(QWidget):
         if block is None:
             return None
 
+        def _is_placed(obj: Any) -> bool:
+            return not hasattr(obj, "isPlaced") or bool(obj.isPlaced())
+
+        unplaced_fallback: Optional[Any] = None
+
         # 1. Direct match
         inst = block.findInst(instance_name)
         if inst is not None:
-            self._instance_resolve_cache[instance_name] = inst
-            return inst
+            if _is_placed(inst):
+                self._instance_resolve_cache[instance_name] = inst
+                return inst
+            unplaced_fallback = inst
 
-        # 2. Sanitize pin suffixes if present
-        clean_name = instance_name
+        # 2. Sanitize pin suffixes and escaped slashes if present
+        clean_name = instance_name.replace(r"\/", "/") if "\\" in instance_name else instance_name
         if ":" in clean_name:
             clean_name = clean_name.split(":", 1)[0]
         clean_upper = clean_name.upper()
-        for pin_suffix in ("/VDD", "/VSS", "/GND", "/VPWR", "/VGND", "/VDDIO", "/VSSIO", "/VDD_CORE", "/VSS_CORE"):
+        for pin_suffix in _PIN_SUFFIXES:
             if clean_upper.endswith(pin_suffix) and len(clean_name) > len(pin_suffix):
                 clean_name = clean_name[:-len(pin_suffix)]
                 break
@@ -641,66 +733,114 @@ class LayoutViewer(QWidget):
         if clean_name != instance_name:
             inst = block.findInst(clean_name)
             if inst is not None:
-                self._instance_resolve_cache[instance_name] = inst
-                return inst
+                if _is_placed(inst):
+                    self._instance_resolve_cache[instance_name] = inst
+                    return inst
+                if unplaced_fallback is None:
+                    unplaced_fallback = inst
 
-        # 3. Bracket escaping/unescaping variations
+        # 3. Bracket & slash escaping/unescaping and dot-to-slash variations
+        unesc_clean = clean_name.replace(r"\[", "[").replace(r"\]", "]") if "\\" in clean_name else clean_name
+        esc_clean = unesc_clean.replace("[", r"\[").replace("]", r"\]") if "[" in unesc_clean else unesc_clean
+
         variants = []
-        if r"\[" in clean_name:
-            variants.append(clean_name.replace(r"\[", "[").replace(r"\]", "]"))
-        if "[" in clean_name and r"\[" not in clean_name:
-            variants.append(clean_name.replace("[", r"\[").replace("]", r"\]"))
-        if "." in clean_name and "/" not in clean_name:
-            variants.append(clean_name.replace(".", "/"))
-            if "[" in clean_name:
-                variants.append(clean_name.replace(".", "/").replace("[", r"\[").replace("]", r"\]"))
+        for cand_v in (
+            unesc_clean,
+            esc_clean,
+            unesc_clean.replace("/", r"\/"),
+            esc_clean.replace("/", r"\/"),
+        ):
+            if cand_v != clean_name and cand_v not in variants:
+                variants.append(cand_v)
+
+        if "." in unesc_clean and "/" not in unesc_clean:
+            dot_slash = unesc_clean.replace(".", "/")
+            variants.append(dot_slash)
+            if "[" in dot_slash:
+                variants.append(dot_slash.replace("[", r"\[").replace("]", r"\]"))
 
         for v in variants:
             inst = block.findInst(v)
             if inst is not None:
-                self._instance_resolve_cache[instance_name] = inst
-                return inst
+                if _is_placed(inst):
+                    self._instance_resolve_cache[instance_name] = inst
+                    return inst
+                if unplaced_fallback is None:
+                    unplaced_fallback = inst
 
         # 4. Multi-bit alias index
         self._ensure_alias_maps()
+        bus_clean = _canonicalize_bus(unesc_clean)
         if self._mbit_alias:
-            inst = self._mbit_alias.get(clean_name)
-            if inst is not None:
-                self._instance_resolve_cache[instance_name] = inst
-                return inst
-            for v in variants:
-                inst = self._mbit_alias.get(v)
+            for key in (clean_name, unesc_clean, bus_clean, *variants):
+                inst = self._mbit_alias.get(key)
                 if inst is not None:
-                    self._instance_resolve_cache[instance_name] = inst
-                    return inst
+                    if _is_placed(inst):
+                        self._instance_resolve_cache[instance_name] = inst
+                        return inst
+                    if unplaced_fallback is None:
+                        unplaced_fallback = inst
 
-        # 5. Top-level prefix stripping
-        if "/" in clean_name:
-            _, sub_name = clean_name.split("/", 1)
-            inst = block.findInst(sub_name)
-            if inst is not None:
-                self._instance_resolve_cache[instance_name] = inst
-                return inst
-            if r"\[" not in sub_name and "[" in sub_name:
-                inst = block.findInst(sub_name.replace("[", r"\[").replace("]", r"\]"))
-                if inst is not None:
-                    self._instance_resolve_cache[instance_name] = inst
-                    return inst
+        # 5. Iterative multi-level hierarchy prefix stripping
+        if "/" in unesc_clean:
+            parts = unesc_clean.split("/")
+            for k in range(1, len(parts)):
+                sub_unesc = "/".join(parts[k:])
+                sub_esc = sub_unesc.replace("[", r"\[").replace("]", r"\]") if "[" in sub_unesc else sub_unesc
+                for sub_cand in (
+                    sub_unesc,
+                    sub_esc,
+                    sub_unesc.replace("/", r"\/"),
+                    sub_esc.replace("/", r"\/"),
+                ):
+                    inst = block.findInst(sub_cand)
+                    if inst is not None:
+                        if _is_placed(inst):
+                            self._instance_resolve_cache[instance_name] = inst
+                            return inst
+                        if unplaced_fallback is None:
+                            unplaced_fallback = inst
+                if self._mbit_alias:
+                    sub_bus = _canonicalize_bus(sub_unesc)
+                    for m_key in (sub_unesc, sub_esc, sub_bus):
+                        inst = self._mbit_alias.get(m_key)
+                        if inst is not None:
+                            if _is_placed(inst):
+                                self._instance_resolve_cache[instance_name] = inst
+                                return inst
+                            if unplaced_fallback is None:
+                                unplaced_fallback = inst
 
-        # 6. Leaf-level resolution with hierarchical disambiguation
-        leaf = clean_name.rsplit("/", 1)[-1] if "/" in clean_name else clean_name
-        leaf_variants = [leaf]
-        if r"\[" in leaf:
-            leaf_variants.append(leaf.replace(r"\[", "[").replace(r"\]", "]"))
-        if "[" in leaf and r"\[" not in leaf:
-            leaf_variants.append(leaf.replace("[", r"\[").replace("]", r"\]"))
+        # 6. Leaf-level resolution (including MBFF sub-registers, bus canonicalization, and stage prefixes)
+        leaf = unesc_clean.rsplit("/", 1)[-1] if "/" in unesc_clean else unesc_clean
+        leaf_esc = leaf.replace("[", r"\[").replace("]", r"\]") if "[" in leaf else leaf
+        leaf_bus = _canonicalize_bus(leaf)
+        leaf_stage = _strip_stage_affixes(leaf_bus)
+
+        leaf_variants: List[str] = []
+        for lv in (leaf, leaf_esc, leaf_bus, leaf_stage):
+            if lv and lv not in leaf_variants:
+                leaf_variants.append(lv)
+
+        # If queried instance is itself a multi-bit flop (CDN_MBIT_ or _MB_), also query its constituent sub-registers
+        if "CDN_MBIT_" in leaf or "_MB_" in leaf:
+            mbit_body = leaf.split("CDN_MBIT_", 1)[1] if "CDN_MBIT_" in leaf else leaf
+            for sub_leaf in mbit_body.split("_MB_"):
+                if not sub_leaf:
+                    continue
+                sub_esc = sub_leaf.replace("[", r"\[").replace("]", r"\]") if "[" in sub_leaf else sub_leaf
+                sub_bus = _canonicalize_bus(sub_leaf)
+                sub_stage = _strip_stage_affixes(sub_bus)
+                for slv in (sub_leaf, sub_esc, sub_bus, sub_stage):
+                    if slv and slv not in leaf_variants:
+                        leaf_variants.append(slv)
 
         if self._mbit_leaf_map:
             for lv in leaf_variants:
                 cand = self._mbit_leaf_map.get(lv)
                 if cand:
-                    chosen = self._disambiguate_candidates(cand, clean_name)
-                    if chosen:
+                    chosen = self._disambiguate_candidates(cand, unesc_clean)
+                    if chosen and (_is_placed(chosen) or unplaced_fallback is None):
                         self._instance_resolve_cache[instance_name] = chosen
                         return chosen
 
@@ -708,10 +848,23 @@ class LayoutViewer(QWidget):
             for lv in leaf_variants:
                 cand = self._leaf_map.get(lv)
                 if cand:
-                    chosen = self._disambiguate_candidates(cand, clean_name)
-                    if chosen:
+                    chosen = self._disambiguate_candidates(cand, unesc_clean)
+                    if chosen and (_is_placed(chosen) or unplaced_fallback is None):
                         self._instance_resolve_cache[instance_name] = chosen
                         return chosen
+
+        # 7. Unrecognized trailing pin-name fallback (e.g. /CP, /Q, /D, /Z, or custom PG pin)
+        if _allow_pin_strip and "/" in unesc_clean:
+            parent_path, last_seg = unesc_clean.rsplit("/", 1)
+            if parent_path and 0 < len(last_seg) <= 12:
+                inst = self.resolve_instance(parent_path, _allow_pin_strip=False)
+                if inst is not None:
+                    self._instance_resolve_cache[instance_name] = inst
+                    return inst
+
+        if unplaced_fallback is not None:
+            self._instance_resolve_cache[instance_name] = unplaced_fallback
+            return unplaced_fallback
 
         return None
 
@@ -720,12 +873,52 @@ class LayoutViewer(QWidget):
             return None
         if len(candidates) == 1:
             return candidates[0]
+
+        placed = [c for c in candidates if hasattr(c, "isPlaced") and c.isPlaced()]
+        pool = placed if placed else candidates
+        if len(pool) == 1:
+            return pool[0]
+
         parent = full_name.rsplit("/", 1)[0] if "/" in full_name else ""
-        if parent:
-            for c in candidates:
-                if parent in c.getName():
-                    return c
-        return candidates[0]
+        if not parent:
+            return pool[0]
+
+        for c in pool:
+            if parent in c.getName():
+                return c
+
+        norm_parent = _canonicalize_bus(parent.replace(r"\/", "/").replace(r"\[", "[").replace(r"\]", "]"))
+        target_parts = [p for p in norm_parent.split("/") if p]
+        if not target_parts:
+            return pool[0]
+        target_set = set(target_parts)
+
+        best_cand = pool[0]
+        best_score = -1
+        for c in pool:
+            c_name = c.getName()
+            if parent in c_name:
+                return c
+            norm_c = _canonicalize_bus(c_name.replace(r"\/", "/").replace(r"\[", "[").replace(r"\]", "]"))
+            c_parent = norm_c.rsplit("/", 1)[0] if "/" in norm_c else ""
+            if not c_parent:
+                continue
+            if c_parent.endswith(norm_parent) or norm_parent.endswith(c_parent):
+                return c
+            c_parts = [p for p in c_parent.split("/") if p]
+            suffix_matches = 0
+            for tp, cp in zip(reversed(target_parts), reversed(c_parts)):
+                if tp == cp:
+                    suffix_matches += 1
+                else:
+                    break
+            common_tokens = len(target_set.intersection(c_parts))
+            score = suffix_matches * 100 + common_tokens
+            if score > best_score:
+                best_score = score
+                best_cand = c
+
+        return best_cand
 
     def _build_ir_drop_color_cache(self) -> None:
         """Initializes fast O(1) instance-name to IR-drop bin mapping without blocking the UI thread."""
@@ -838,6 +1031,9 @@ class LayoutViewer(QWidget):
             leaf_to_bin.setdefault(leaf, bin_idx)
             if "[" in leaf:
                 leaf_to_bin.setdefault(leaf.replace("[", r"\[").replace("]", r"\]"), bin_idx)
+            leaf_bus = _canonicalize_bus(leaf)
+            if leaf_bus != leaf:
+                leaf_to_bin.setdefault(leaf_bus, bin_idx)
 
         self._ir_drop_name_to_bin = name_to_bin
         self._ir_drop_leaf_to_bin = leaf_to_bin
@@ -881,11 +1077,15 @@ class LayoutViewer(QWidget):
 
         if b is None and leaf_to_bin:
             b = leaf_to_bin.get(leaf)
-            if b is None and "CDN_MBIT_" in leaf:
-                mbit_part = leaf.split("CDN_MBIT_", 1)[1]
+            if b is None:
+                b = leaf_to_bin.get(_canonicalize_bus(leaf))
+            if b is None and ("CDN_MBIT_" in leaf or "_MB_" in leaf):
+                mbit_part = leaf.split("CDN_MBIT_", 1)[1] if "CDN_MBIT_" in leaf else leaf
                 best_b = -1
                 for sub_leaf in mbit_part.split("_MB_"):
                     sb = leaf_to_bin.get(sub_leaf, -1)
+                    if sb < 0:
+                        sb = leaf_to_bin.get(_canonicalize_bus(sub_leaf), -1)
                     if sb > best_b:
                         best_b = sb
                 if best_b >= 0:
@@ -894,8 +1094,6 @@ class LayoutViewer(QWidget):
         res = b if b is not None else -1
         name_to_bin[name] = res
         return res
-
-
 
     def _resolve_timing_path_points(self, path: Any) -> List[Point]:
         """Resolves ordered physical DBU points along the timing path with 2-tier caching."""
@@ -914,39 +1112,9 @@ class LayoutViewer(QWidget):
             if not pin_name:
                 return None
             inst_name = pin_name.rsplit("/", 1)[0] if "/" in pin_name else pin_name
-
-            # 1. Exact full-name match in block
-            inst = block.findInst(inst_name)
-
-            # 2. Exact prefix + mbit sub-register match
-            if inst is None and self._mbit_alias:
-                inst = self._mbit_alias.get(inst_name)
-
-            # 3. Leaf multi-bit match with hierarchy disambiguation
-            if inst is None and self._mbit_leaf_map:
-                leaf = inst_name.rsplit("/", 1)[-1] if "/" in inst_name else inst_name
-                candidates = self._mbit_leaf_map.get(leaf)
-                if candidates:
-                    inst = candidates[0]
-                    if len(candidates) > 1 and "/" in inst_name:
-                        parent = inst_name.rsplit("/", 1)[0]
-                        for c in candidates:
-                            if parent in c.getName():
-                                inst = c
-                                break
-
-            # 4. Leaf placed cell fallback
-            if inst is None and self._leaf_map:
-                leaf = inst_name.rsplit("/", 1)[-1] if "/" in inst_name else inst_name
-                candidates = self._leaf_map.get(leaf)
-                if candidates:
-                    inst = candidates[0]
-                    if len(candidates) > 1 and "/" in inst_name:
-                        parent = inst_name.rsplit("/", 1)[0]
-                        for c in candidates:
-                            if parent in c.getName():
-                                inst = c
-                                break
+            inst = self.resolve_instance(inst_name, _allow_pin_strip=False)
+            if inst is None and inst_name != pin_name:
+                inst = self.resolve_instance(pin_name)
 
             if inst and inst.isPlaced():
                 return inst.getBBox().getBox().center()
@@ -2249,5 +2417,8 @@ class LayoutViewer(QWidget):
             self.setCursor(cursor)
             self.centering_shift += self._pan_offset
             self._pan_offset = QPoint(0, 0)
+            w = max(self.width(), 100)
+            h = max(self.height(), 100)
+            self._center = self.screenPointToDBU(QPoint(w // 2, h // 2))
             self.fullRepaint()
             event.accept()

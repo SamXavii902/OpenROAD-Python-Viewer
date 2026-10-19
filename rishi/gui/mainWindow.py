@@ -1060,7 +1060,10 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage(f"No DEF instance matches {instance_name}", 5000)
             return
         box = inst.getBBox().getBox()
-        self._viewer.zoomTo(box, animate=self._viewer.isVisible())
+        if box.dx() <= 0 or box.dy() <= 0:
+            orig = inst.getOrigin() if hasattr(inst, "getOrigin") else box.center()
+            box = Rect(orig.x - 1000, orig.y - 1000, orig.x + 1000, orig.y + 1000)
+
         self._viewer.selectInstance(inst, emit_signal=False)
 
         # Highlight cell with its exact IR-drop bin color and ping
@@ -1085,9 +1088,13 @@ class MainWindow(QMainWindow):
                 6000,
             )
         else:
-            self._viewer.highlightObject(box, label=f"{inst.getName()}")
-            self._viewer.pingLocation(box.center(), color=QColor("#D8588A"))
+            bin_idx = self._viewer.resolve_ir_drop_bin(inst.getName()) if hasattr(self._viewer, "resolve_ir_drop_bin") else -1
+            bin_color = QColor(IR_DROP_PALETTE[bin_idx]) if 0 <= bin_idx < len(IR_DROP_PALETTE) else QColor("#D8588A")
+            self._viewer.highlightObject(box, label=f"{inst.getName()}", color=bin_color)
+            self._viewer.pingLocation(box.center(), color=bin_color)
             self._status_bar.showMessage(f"IR-drop hotspot: {inst.getName()}", 5000)
+
+        self._viewer.zoomTo(box, animate=self._viewer.isVisible())
 
         # Ensure IR Drop dock remains raised and active
         if hasattr(self, "_ir_drop_dock") and self._ir_drop_dock is not None:
