@@ -248,15 +248,18 @@ class RenderThread(QThread):
                     return
                 self.drawLayer(painter, block, layer, insts, bounds, gui_painter)
 
-        if ir_drop_active:
-            self.drawIRDropOverlay(painter, insts, bounds)
-
         if self._restart:
             return
 
         # 6. Draw rows & sites (L1280)
         if options.areRowsVisible():
             self.drawRows(painter, block, bounds)
+
+        if ir_drop_active:
+            self.drawIRDropOverlay(painter, insts, bounds)
+
+        if self._restart:
+            return
 
         # 7. Re-draw Die & Polygon outlines on top of blockages/macros so boundaries remain unbroken
         self.drawBoundaries(painter, block)
@@ -278,6 +281,10 @@ class RenderThread(QThread):
         if report is None:
             return
 
+        ensure_fn = getattr(self._viewer, "_ensure_ir_drop_color_cache", None)
+        if ensure_fn is not None:
+            ensure_fn()
+
         resolve_fn = getattr(self._viewer, "resolve_ir_drop_bin", None)
         name_to_bin = getattr(self._viewer, "_ir_drop_name_to_bin", None)
         if name_to_bin is None and resolve_fn is None:
@@ -292,7 +299,7 @@ class RenderThread(QThread):
             pen = QPen(color.lighter(125), 0)
             pen.setCosmetic(True)
             pens.append(pen)
-            color.setAlpha(185)
+            color.setAlpha(195)
             brushes.append(QBrush(color))
 
         # Fast Vectorized Progressive LOD path using SpatialSearch NumPy arrays
@@ -306,15 +313,12 @@ class RenderThread(QThread):
                 & (boxes[:, 1] <= bounds.yMax())
                 & (~search._inst_is_macro)
             )
-            is_filler = getattr(search, "_inst_is_filler", None)
-            if is_filler is not None:
-                mask &= (~is_filler)
             vis_indices = np.flatnonzero(mask)
             num_vis = len(vis_indices)
             if num_vis == 0:
                 return
 
-            LOD_BUDGET = 6000
+            LOD_BUDGET = 8000
             stride = max(1, (num_vis + LOD_BUDGET - 1) // LOD_BUDGET)
             sampled_indices = vis_indices[::stride] if stride > 1 else vis_indices
 
@@ -325,6 +329,7 @@ class RenderThread(QThread):
                 self._viewer._ir_drop_inst_bins = inst_bins
 
             bins_to_draw: Tuple[List[int], ...] = ([], [], [], [], [])
+            total_matched = 0
             for k, raw_idx in enumerate(sampled_indices):
                 if k % 2000 == 0 and self._restart:
                     return
@@ -343,22 +348,47 @@ class RenderThread(QThread):
                     inst_bins[i] = b
                 if 0 <= b < 5:
                     bins_to_draw[b].append(i)
+                    total_matched += 1
+
+            # If strided sampling hit mostly filler/unreported cells, scan remaining visible instances
+            # up to LOD_BUDGET matched cells so sparse or filler-heavy designs still render all colors.
+            if stride > 1 and total_matched < min(1000, LOD_BUDGET):
+                for k, raw_idx in enumerate(vis_indices):
+                    if k % 4000 == 0 and self._restart:
+                        return
+                    if k % stride == 0:
+                        continue
+                    i = int(raw_idx)
+                    b = int(inst_bins[i])
+                    if b == -2:
+                        name = all_insts[i].getName()
+                        if resolve_fn is not None:
+                            b = resolve_fn(name)
+                        else:
+                            b_val = name_to_bin.get(name) if name_to_bin else None
+                            if b_val is None and leaf_to_bin:
+                                leaf = name.rsplit("/", 1)[-1] if "/" in name else name
+                                b_val = leaf_to_bin.get(leaf)
+                            b = b_val if b_val is not None else -1
+                        inst_bins[i] = b
+                    if 0 <= b < 5:
+                        bins_to_draw[b].append(i)
+                        total_matched += 1
+                        if total_matched >= LOD_BUDGET:
+                            break
 
             painter.save()
             if stride > 1:
-                scale = min(float(stride) ** 0.45, 6.0)
-                min_dbu = int(2.2 / max(ppd, 1e-6))
+                eff_stride = max(1, num_vis // max(total_matched, 1)) if total_matched > 0 else stride
+                scale = min(float(max(stride, eff_stride)) ** 0.48, 7.0)
+                min_dbu = int(3.5 / max(ppd, 1e-6))
                 for b_idx in range(len(IR_DROP_PALETTE)):
                     idx_list = bins_to_draw[b_idx]
                     if not idx_list:
                         continue
                     c = QColor(IR_DROP_PALETTE[b_idx])
-                    if stride > 2:
-                        painter.setPen(Qt.NoPen)
-                        c.setAlpha(215)
-                    else:
-                        painter.setPen(pens[b_idx])
-                        c.setAlpha(195)
+                    c.setAlpha(210 if stride > 2 else 195)
+                    painter.setPen(pens[b_idx])
                     painter.setBrush(QBrush(c))
                     for i in idx_list:
                         x1 = int(boxes[i, 0])
@@ -391,7 +421,7 @@ class RenderThread(QThread):
             return
         painter.save()
         last_idx = None
-        step = max(1, len(insts) // 6000)
+        step = max(1, len(insts) // 8000)
         for index in range(0, len(insts), step):
             if index % 2000 == 0 and self._restart:
                 break
@@ -506,6 +536,9 @@ class RenderThread(QThread):
 
         resolve_fn = getattr(self._viewer, "resolve_ir_drop_bin", None)
         if ir_drop_active:
+            ensure_fn = getattr(self._viewer, "_ensure_ir_drop_color_cache", None)
+            if ensure_fn is not None:
+                ensure_fn()
             name_to_bin = getattr(self._viewer, "_ir_drop_name_to_bin", None)
             if name_to_bin is None and resolve_fn is None:
                 report = getattr(self._viewer, "_ir_drop_data", None)

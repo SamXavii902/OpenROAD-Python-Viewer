@@ -541,4 +541,77 @@ def test_ir_drop_progressive_lod_overlay_scales_from_zoom_out_to_zoom_in(qapp):
     assert viewer._ir_drop_inst_bins is not None
     assert int(viewer._ir_drop_inst_bins[0]) >= 0
     assert int(viewer._ir_drop_inst_bins[1]) >= 0
-    viewer.close()
+    viewer.close()
+
+
+def test_ir_drop_large_report_leaf_and_zoomed_out_rendering(qapp):
+    import numpy as np
+    from PySide6.QtCore import QPoint
+
+    # Create a >5,000 record report where report names have top-level hierarchy prefixes
+    records = {f"tb/top/u_eth/cell_{i}[0]": (float((i % 5) * 30 + 10), "NAND2_X1") for i in range(6000)}
+    report = IRDropReportData(
+        records_by_instance=records,
+        ordered_instances=list(records.keys()),
+        minimum_mv=0.0,
+        maximum_mv=150.0,
+        bins=[IRDropBin(0.0, 150.0, 6000)],
+    )
+
+    class FakeInst:
+        def __init__(self, name):
+            self._name = name
+        def getName(self):
+            return self._name
+
+    # DEF instances use escaped slashes/brackets and leaf-level naming, plus many filler cells
+    n_insts = 20000
+    insts = []
+    boxes = np.zeros((n_insts, 4), dtype=np.int32)
+    for i in range(n_insts):
+        if i < 6000:
+            insts.append(FakeInst(rf"u_eth\/cell_{i}\[0\]"))
+        else:
+            insts.append(FakeInst(f"FILLER_{i}"))
+        x = (i % 200) * 5000
+        y = (i // 200) * 5000
+        boxes[i] = [x, y, x + 2000, y + 2000]
+
+    class FakeSearch:
+        def __init__(self):
+            self._insts = insts
+            self._inst_boxes = boxes
+            self._inst_is_macro = np.zeros(n_insts, dtype=bool)
+            self._inst_is_filler = np.array([i >= 6000 for i in range(n_insts)], dtype=bool)
+
+    viewer = LayoutViewer()
+    viewer._search = FakeSearch()
+    viewer.setIRDropData(report)
+    viewer.setIRDropMapVisible(True)
+    # Full-chip zoomed-out scale (ppd = 0.0002) with negative Y scale matching RenderThread.draw
+    ppd = 0.0002
+    viewer.pixels_per_dbu = ppd
+
+    renderer = RenderThread(viewer)
+    img = QImage(300, 300, QImage.Format_ARGB32_Premultiplied)
+    bg = QColor(20, 20, 20)
+    img.fill(bg)
+    painter = QPainter(img)
+    painter.translate(QPoint(20, 280))
+    painter.scale(ppd, -ppd)
+    renderer.drawIRDropOverlay(painter, [], bounds=Rect(0, 0, 1000000, 1000000))
+    painter.end()
+
+    # Cache must now be built and DEF instances resolved despite >5,000 records and naming differences
+    assert viewer._ir_drop_cache_ready is True
+    assert len(viewer._ir_drop_leaf_to_bin) >= 6000
+    assert viewer.resolve_ir_drop_bin(r"u_eth\/cell_4\[0\]") == 4
+
+    # Verify non-background colored pixels were drawn at full-chip zoomed-out scale
+    colored_pixels = sum(
+        1 for y in range(300) for x in range(300)
+        if (img.pixel(x, y) & 0xFFFFFF) != 0x141414
+    )
+    assert colored_pixels > 100
+    viewer.close()
+

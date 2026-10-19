@@ -117,6 +117,7 @@ class LayoutViewer(QWidget):
         self._ir_drop_leaf_to_bin: Dict[str, int] = {}
         self._ir_drop_inst_bins: Optional[np.ndarray] = None
         self._ir_drop_prefixes: Tuple[str, ...] = ()
+        self._ir_drop_cache_ready: bool = False
 
         # 60 FPS Vector Animation Overlay Engine
         self._anim_timer = QTimer(self)
@@ -729,10 +730,12 @@ class LayoutViewer(QWidget):
     def _build_ir_drop_color_cache(self) -> None:
         """Initializes fast O(1) instance-name to IR-drop bin mapping without blocking the UI thread."""
         self._ir_drop_inst_bins = None
+        self._ir_drop_cache_ready = False
         if self._ir_drop_data is None:
             self._ir_drop_name_to_bin = {}
             self._ir_drop_leaf_to_bin = {}
             self._ir_drop_prefixes = ()
+            self._ir_drop_cache_ready = True
             return
 
         report = self._ir_drop_data
@@ -741,6 +744,7 @@ class LayoutViewer(QWidget):
             self._ir_drop_name_to_bin = {}
             self._ir_drop_leaf_to_bin = {}
             self._ir_drop_prefixes = ()
+            self._ir_drop_cache_ready = True
             return
 
         # Discover hierarchy prefixes from a tiny sample (first 50 keys) in <0.05ms
@@ -756,106 +760,140 @@ class LayoutViewer(QWidget):
                     prefixes.append(pref)
         self._ir_drop_prefixes = tuple(prefixes)
 
-        # For large industrial reports (>5,000 cells), use 100% lazy on-demand memoization
-        # so toggling or loading the IR-drop map takes 0ms on the main GUI thread.
+        # For large industrial reports (>5,000 cells), defer building the full lookup tables
+        # to _ensure_ir_drop_color_cache() on the background RenderThread so the UI thread takes 0ms.
         if len(records) > 5000:
             self._ir_drop_name_to_bin = {}
             self._ir_drop_leaf_to_bin = {}
             return
 
+        self._ensure_ir_drop_color_cache()
+
+    def _ensure_ir_drop_color_cache(self) -> None:
+        """Populates full O(1) instance-name and leaf-name to IR-drop bin dictionaries.
+        Safe to invoke from the background RenderThread so the main GUI thread never blocks.
+        """
+        if getattr(self, "_ir_drop_cache_ready", False):
+            return
+
+        report = self._ir_drop_data
+        if report is None:
+            self._ir_drop_name_to_bin = {}
+            self._ir_drop_leaf_to_bin = {}
+            self._ir_drop_cache_ready = True
+            return
+
+        records = getattr(report, "records_by_instance", {})
+        if not records:
+            self._ir_drop_name_to_bin = {}
+            self._ir_drop_leaf_to_bin = {}
+            self._ir_drop_cache_ready = True
+            return
+
         name_to_bin: Dict[str, int] = {}
         leaf_to_bin: Dict[str, int] = {}
 
-        for inst_name, rec in records.items():
-            drop_mv = rec[0]
-            bin_idx = report.color_index(drop_mv)
+        palette_bins = getattr(report, "palette_bin_instances", None)
+        if palette_bins and len(palette_bins) == len(IR_DROP_PALETTE) and any(palette_bins):
+            pairs_iter = (
+                (inst_name, bin_idx)
+                for bin_idx in range(len(palette_bins) - 1, -1, -1)
+                for inst_name in palette_bins[bin_idx]
+            )
+        else:
+            pairs_iter = (
+                (inst_name, report.color_index(rec[0]))
+                for inst_name, rec in records.items()
+            )
+
+        for inst_name, bin_idx in pairs_iter:
             name_to_bin[inst_name] = bin_idx
 
-            if "[" in inst_name and r"\[" not in inst_name:
-                name_to_bin[inst_name.replace("[", r"\[").replace("]", r"\]")] = bin_idx
-            elif r"\[" in inst_name:
-                name_to_bin[inst_name.replace(r"\[", "[").replace(r"\]", "]")] = bin_idx
+            norm = inst_name.replace(r"\/", "/") if "\\" in inst_name else inst_name
+            if "." in norm and "/" not in norm:
+                norm = norm.replace(".", "/")
+                name_to_bin.setdefault(norm, bin_idx)
 
-            if "." in inst_name and "/" not in inst_name:
-                slash_name = inst_name.replace(".", "/")
-                name_to_bin[slash_name] = bin_idx
+            if "[" in norm and r"\[" not in norm:
+                name_to_bin.setdefault(norm.replace("[", r"\[").replace("]", r"\]"), bin_idx)
+            elif r"\[" in norm:
+                unesc = norm.replace(r"\[", "[").replace(r"\]", "]")
+                name_to_bin.setdefault(unesc, bin_idx)
+                norm = unesc
 
-            if "/" in inst_name:
-                sub = inst_name.split("/", 1)[1]
+            if "/" in norm:
+                sub = norm.split("/", 1)[1]
                 name_to_bin.setdefault(sub, bin_idx)
+                if "[" in sub:
+                    name_to_bin.setdefault(sub.replace("[", r"\[").replace("]", r"\]"), bin_idx)
+                if "/" in sub:
+                    sub2 = sub.split("/", 1)[1]
+                    name_to_bin.setdefault(sub2, bin_idx)
+                    if "[" in sub2:
+                        name_to_bin.setdefault(sub2.replace("[", r"\[").replace("]", r"\]"), bin_idx)
+                leaf = norm.rsplit("/", 1)[-1]
+            else:
+                leaf = norm
 
-            leaf = inst_name.rsplit("/", 1)[-1] if "/" in inst_name else inst_name
             leaf_to_bin.setdefault(leaf, bin_idx)
+            if "[" in leaf:
+                leaf_to_bin.setdefault(leaf.replace("[", r"\[").replace("]", r"\]"), bin_idx)
 
         self._ir_drop_name_to_bin = name_to_bin
         self._ir_drop_leaf_to_bin = leaf_to_bin
+        self._ir_drop_cache_ready = True
 
     def resolve_ir_drop_bin(self, name: str) -> int:
         """Fast O(1) memoized lookup returning palette bin 0..4, or -1 if instance has no IR-drop record."""
-        cached = self._ir_drop_name_to_bin.get(name)
+        if not getattr(self, "_ir_drop_cache_ready", False):
+            self._ensure_ir_drop_color_cache()
+
+        name_to_bin = self._ir_drop_name_to_bin
+        cached = name_to_bin.get(name)
         if cached is not None:
             return cached
 
         report = self._ir_drop_data
         if report is None:
             return -1
-        records = getattr(report, "records_by_instance", None)
-        if not records:
-            return -1
 
-        rec = records.get(name)
-        if rec is None:
-            if r"\[" in name:
-                unesc = name.replace(r"\[", "[").replace(r"\]", "]")
-                rec = records.get(unesc)
-            elif "[" in name:
-                esc = name.replace("[", r"\[").replace("]", r"\]")
-                rec = records.get(esc)
-            else:
-                unesc = None
-                esc = None
+        leaf_to_bin = self._ir_drop_leaf_to_bin
 
-            if rec is None and "/" in name:
-                sub = name.split("/", 1)[1]
-                rec = records.get(sub)
-                if rec is None:
-                    if r"\[" in sub:
-                        rec = records.get(sub.replace(r"\[", "[").replace(r"\]", "]"))
-                    elif "[" in sub:
-                        rec = records.get(sub.replace("[", r"\[").replace("]", r"\]"))
+        norm = name.replace(r"\/", "/") if "\\" in name else name
+        if r"\[" in norm:
+            norm = norm.replace(r"\[", "[").replace(r"\]", "]")
 
-            if rec is None and self._ir_drop_prefixes:
-                for pref in self._ir_drop_prefixes:
-                    rec = records.get(pref + name)
-                    if rec is not None:
-                        break
-                    if unesc is not None:
-                        rec = records.get(pref + unesc)
-                        if rec is not None:
-                            break
-                    elif esc is not None:
-                        rec = records.get(pref + esc)
-                        if rec is not None:
-                            break
-
-            if rec is None and "/" in name:
-                leaf = name.rsplit("/", 1)[-1]
-                rec = records.get(leaf)
-                if rec is None and self._ir_drop_leaf_to_bin:
-                    b = self._ir_drop_leaf_to_bin.get(leaf, -1)
-                    self._ir_drop_name_to_bin[name] = b
-                    return b
-
-        if rec is not None:
-            b = report.color_index(rec[0])
-        elif self._ir_drop_leaf_to_bin:
-            leaf = name.rsplit("/", 1)[-1] if "/" in name else name
-            b = self._ir_drop_leaf_to_bin.get(leaf, -1)
+        b = name_to_bin.get(norm)
+        if b is None and "/" in norm:
+            sub = norm.split("/", 1)[1]
+            b = name_to_bin.get(sub)
+            if b is None and "/" in sub:
+                b = name_to_bin.get(sub.split("/", 1)[1])
+            leaf = norm.rsplit("/", 1)[-1]
         else:
-            b = -1
+            leaf = norm
 
-        self._ir_drop_name_to_bin[name] = b
-        return b
+        if b is None and self._ir_drop_prefixes:
+            for pref in self._ir_drop_prefixes:
+                b = name_to_bin.get(pref + norm)
+                if b is not None:
+                    break
+
+        if b is None and leaf_to_bin:
+            b = leaf_to_bin.get(leaf)
+            if b is None and "CDN_MBIT_" in leaf:
+                mbit_part = leaf.split("CDN_MBIT_", 1)[1]
+                best_b = -1
+                for sub_leaf in mbit_part.split("_MB_"):
+                    sb = leaf_to_bin.get(sub_leaf, -1)
+                    if sb > best_b:
+                        best_b = sb
+                if best_b >= 0:
+                    b = best_b
+
+        res = b if b is not None else -1
+        name_to_bin[name] = res
+        return res
 
 
 
