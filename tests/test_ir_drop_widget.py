@@ -695,4 +695,147 @@ def test_resolve_instance_complex_eda_naming_and_mbff(qapp):
 
     viewer.close()
 
+
+def test_ir_drop_histogram_bin_selection_filters_colored_cells(qapp, tmp_path):
+    import numpy as np
+
+    report_file = tmp_path / "bin_filter.rpt"
+    report_file.write_text(
+        """0.8800 0.9000 0.8800 0 10 20 0.90 vdd/gnd INV_X1 top/cell_low
+0.8200 0.9000 0.8200 0 30 20 0.90 vdd/gnd BUF_X2 top/cell_mid
+0.7500 0.9000 0.7500 0 50 20 0.90 vdd/gnd NAND2_X1 top/cell_high
+""",
+        encoding="utf-8",
+    )
+    data = IRDropParser().parse_file(str(report_file))
+
+    class FakeMaster:
+        def isMacro(self):
+            return False
+
+        def getHeight(self):
+            return 0
+
+    class FakeBox:
+        def __init__(self, rect):
+            self._rect = rect
+
+        def getBox(self):
+            return self._rect
+
+    class FakeInst:
+        def __init__(self, name, rect):
+            self._name = name
+            self._master = FakeMaster()
+            self._bbox = FakeBox(rect)
+
+        def getName(self):
+            return self._name
+
+        def getMaster(self):
+            return self._master
+
+        def getBBox(self):
+            return self._bbox
+
+    inst_low = FakeInst("top/cell_low", Rect(4, 4, 16, 20))
+    inst_mid = FakeInst("top/cell_mid", Rect(24, 4, 36, 20))
+    inst_high = FakeInst("top/cell_high", Rect(44, 4, 56, 20))
+    insts = [inst_low, inst_mid, inst_high]
+
+    class FakeSearch:
+        def __init__(self):
+            self._insts = insts
+            self._inst_boxes = np.array(
+                [
+                    [4, 4, 16, 20],
+                    [24, 4, 36, 20],
+                    [44, 4, 56, 20],
+                ],
+                dtype=np.int32,
+            )
+            self._inst_is_macro = np.zeros(3, dtype=bool)
+
+    viewer = LayoutViewer()
+    viewer._search = FakeSearch()
+    widget = IRDropWidget(layout_viewer=viewer)
+    widget.set_report_data(data)
+    widget._map_toggle.setChecked(True)
+
+    renderer = RenderThread(viewer)
+    bg = QColor("#101010")
+
+    def render_overlay_and_outlines():
+        img_ov = QImage(64, 28, QImage.Format_ARGB32_Premultiplied)
+        img_ov.fill(bg)
+        p_ov = QPainter(img_ov)
+        renderer.drawIRDropOverlay(p_ov, insts, bounds=Rect(0, 0, 64, 28))
+        p_ov.end()
+
+        img_out = QImage(64, 28, QImage.Format_ARGB32_Premultiplied)
+        img_out.fill(bg)
+        p_out = QPainter(img_out)
+        renderer.drawInstanceOutlines(p_out, insts)
+        p_out.end()
+        return img_ov, img_out
+
+    # 1. No bin selected: all 3 standard cells are colored
+    img_ov_all, img_out_all = render_overlay_and_outlines()
+    assert img_ov_all.pixelColor(10, 12) != bg
+    assert img_ov_all.pixelColor(30, 12) != bg
+    assert img_ov_all.pixelColor(50, 12) != bg
+    assert img_out_all.pixelColor(10, 12) != bg
+    assert img_out_all.pixelColor(30, 12) != bg
+    assert img_out_all.pixelColor(50, 12) != bg
+
+    cached_bins_ref = viewer._ir_drop_inst_bins
+    cached_hbins_ref = viewer._ir_drop_inst_hbins
+    assert cached_bins_ref is not None
+    assert cached_hbins_ref is not None
+
+    # 2. Select the highest IR-drop bin (containing only top/cell_high):
+    high_bin = data.bins[-1]
+    assert high_bin.count == 1
+    widget._on_bin_selected(high_bin)
+    assert viewer.getIRDropSelectedBin() == high_bin
+    # Switching bins must NOT invalidate or reallocate cached NumPy arrays
+    assert viewer._ir_drop_inst_bins is cached_bins_ref
+    assert viewer._ir_drop_inst_hbins is cached_hbins_ref
+
+    img_ov_high, img_out_high = render_overlay_and_outlines()
+    assert img_ov_high.pixelColor(10, 12) == bg
+    assert img_ov_high.pixelColor(30, 12) == bg
+    assert img_ov_high.pixelColor(50, 12) != bg
+    # In drawInstanceOutlines, non-matching cells have uncolored interior (bg) while matching cell is filled
+    assert img_out_high.pixelColor(10, 12) == bg
+    assert img_out_high.pixelColor(30, 12) == bg
+    assert img_out_high.pixelColor(50, 12) != bg
+
+    # 3. Select the lowest IR-drop bin (containing only top/cell_low):
+    low_bin = data.bins[0]
+    assert low_bin.count == 1
+    widget._on_bin_selected(low_bin)
+    img_ov_low, img_out_low = render_overlay_and_outlines()
+    assert img_ov_low.pixelColor(10, 12) != bg
+    assert img_ov_low.pixelColor(30, 12) == bg
+    assert img_ov_low.pixelColor(50, 12) == bg
+    assert img_out_low.pixelColor(10, 12) != bg
+    assert img_out_low.pixelColor(30, 12) == bg
+    assert img_out_low.pixelColor(50, 12) == bg
+
+    # 4. Reset filters: all 3 standard cells are colored again
+    widget._reset_filters()
+    assert viewer.getIRDropSelectedBin() is None
+    img_ov_reset, img_out_reset = render_overlay_and_outlines()
+    assert img_ov_reset.pixelColor(10, 12) != bg
+    assert img_ov_reset.pixelColor(30, 12) != bg
+    assert img_ov_reset.pixelColor(50, 12) != bg
+    assert img_out_reset.pixelColor(10, 12) != bg
+    assert img_out_reset.pixelColor(30, 12) != bg
+    assert img_out_reset.pixelColor(50, 12) != bg
+
+    widget.close()
+    viewer.close()
+
+
 

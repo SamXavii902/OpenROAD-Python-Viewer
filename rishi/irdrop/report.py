@@ -89,6 +89,21 @@ class IRDropReportData:
         fraction = (value_mv - self.minimum_mv) / (self.maximum_mv - self.minimum_mv)
         return min(max(int(fraction * len(IR_DROP_PALETTE)), 0), len(IR_DROP_PALETTE) - 1)
 
+    def histogram_bin_index(self, value_mv: float) -> int:
+        if not self.bins:
+            return 0
+        bin_count = len(self.bins)
+        if self.maximum_mv > self.minimum_mv:
+            fraction = (value_mv - self.minimum_mv) / (self.maximum_mv - self.minimum_mv)
+            idx = min(max(int(fraction * bin_count), 0), bin_count - 1)
+            b = self.bins[idx]
+            if b.minimum_mv - 1e-6 <= value_mv <= b.maximum_mv + 1e-6:
+                return idx
+        for i, b in enumerate(self.bins):
+            if b.minimum_mv - 1e-6 <= value_mv <= b.maximum_mv + 1e-6:
+                return i
+        return bin_count - 1
+
 
 class IRDropParser:
     """Parses reports with whitespace-separated min_pg_sim and ideal_voltage columns."""

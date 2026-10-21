@@ -198,13 +198,14 @@ class IRDropWidget(QWidget):
 
     instance_selected = Signal(str)
     map_visibility_changed = Signal(bool)
+    bin_filter_changed = Signal(object)
 
     PAGE_SIZE = 100
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, layout_viewer: Any = None):
         super().__init__(parent)
         self._report: Optional[IRDropReportData] = None
-        self._layout_viewer: Any = None
+        self._layout_viewer: Any = layout_viewer
         self._loader: Optional[IRDropLoadThread] = None
         self._load_generation = 0
         self._filtered_instances: List[str] = []
@@ -592,17 +593,25 @@ class IRDropWidget(QWidget):
     def _sync_map_data(self) -> None:
         if self._layout_viewer is not None:
             self._layout_viewer.setIRDropData(self._report)
+            if hasattr(self._layout_viewer, "setIRDropSelectedBin"):
+                self._layout_viewer.setIRDropSelectedBin(self._selected_bin)
             self._layout_viewer.setIRDropMapVisible(self._map_toggle.isChecked())
 
     def _on_bin_selected(self, selected: Optional[IRDropBin]) -> None:
         """Instant O(1) bin filtering without scanning the entire design."""
         self._selected_bin = selected
+        if self._layout_viewer is not None and hasattr(self._layout_viewer, "setIRDropSelectedBin"):
+            self._layout_viewer.setIRDropSelectedBin(selected)
+        self.bin_filter_changed.emit(selected)
         self._page = 0
         self._refresh_tables()
 
     def _reset_filters(self) -> None:
         self._selected_bin = None
         self._histogram.clear_selection()
+        if self._layout_viewer is not None and hasattr(self._layout_viewer, "setIRDropSelectedBin"):
+            self._layout_viewer.setIRDropSelectedBin(None)
+        self.bin_filter_changed.emit(None)
         self._search.clear()
         self._threshold_toggle.setChecked(False)
         self._page = 0
@@ -806,6 +815,7 @@ class IRDropDock(QDockWidget):
 
     instance_selected = Signal(str)
     map_visibility_changed = Signal(bool)
+    bin_filter_changed = Signal(object)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__("IR-Drop Analysis", parent)
@@ -815,6 +825,7 @@ class IRDropDock(QDockWidget):
         self._widget: IRDropWidget = self.widget()
         self._widget.instance_selected.connect(self.instance_selected.emit)
         self._widget.map_visibility_changed.connect(self.map_visibility_changed.emit)
+        self._widget.bin_filter_changed.connect(self.bin_filter_changed.emit)
 
     def get_widget(self) -> IRDropWidget:
         return self._widget

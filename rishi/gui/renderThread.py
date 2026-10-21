@@ -1,6 +1,6 @@
 """RenderThread ported from RISHI gui/src/renderThread.cpp."""
 
-from typing import TYPE_CHECKING, List, Dict, Tuple, Optional
+from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Any
 from PySide6.QtCore import QThread, Signal, QMutex, QWaitCondition, QRect, QRectF, QPoint, QPointF, Qt
 from PySide6.QtGui import (
     QImage,
@@ -272,6 +272,26 @@ class RenderThread(QThread):
         if options.areIOPinsVisible():
             self.drawIOPins(painter, block, bounds)
 
+    def _get_selected_hbin_info(self, report: Any) -> Tuple[Optional[int], Optional[Any]]:
+        selected_bin = getattr(self._viewer, "_ir_drop_selected_bin", None)
+        selected_hbin = getattr(self._viewer, "_ir_drop_selected_hbin_idx", None)
+        if selected_bin is not None and selected_hbin is None and report is not None:
+            bins = getattr(report, "bins", None)
+            if bins:
+                try:
+                    selected_hbin = bins.index(selected_bin)
+                except ValueError:
+                    for idx, b in enumerate(bins):
+                        if (
+                            abs(b.minimum_mv - selected_bin.minimum_mv) < 1e-6
+                            and abs(b.maximum_mv - selected_bin.maximum_mv) < 1e-6
+                        ):
+                            selected_hbin = idx
+                            break
+            if selected_hbin is None and hasattr(selected_bin, "bin_index"):
+                selected_hbin = int(selected_bin.bin_index)
+        return selected_hbin, selected_bin
+
     def drawIRDropOverlay(self, painter: QPainter, insts: List[dbInst], bounds: Optional[Rect] = None) -> None:
         """Draws IR-drop range colors over standard cells with progressive multi-resolution LOD."""
         ppd = getattr(self._viewer, "pixels_per_dbu", 1.0)
@@ -285,12 +305,42 @@ class RenderThread(QThread):
         if ensure_fn is not None:
             ensure_fn()
 
+        selected_hbin, selected_bin = self._get_selected_hbin_info(report)
+
+        resolve_both_fn = getattr(self._viewer, "resolve_ir_drop_bin_and_hbin", None)
         resolve_fn = getattr(self._viewer, "resolve_ir_drop_bin", None)
         name_to_bin = getattr(self._viewer, "_ir_drop_name_to_bin", None)
-        if name_to_bin is None and resolve_fn is None:
-            records = getattr(report, "records_by_instance", {})
+        name_to_hbin = getattr(self._viewer, "_ir_drop_name_to_hbin", None)
+        records = getattr(report, "records_by_instance", {})
+        if name_to_bin is None and resolve_fn is None and resolve_both_fn is None:
             name_to_bin = {k: report.color_index(v[0]) for k, v in records.items()}
+        if name_to_hbin is None and resolve_both_fn is None and hasattr(report, "histogram_bin_index"):
+            name_to_hbin = {k: report.histogram_bin_index(v[0]) for k, v in records.items()}
         leaf_to_bin = getattr(self._viewer, "_ir_drop_leaf_to_bin", {})
+        leaf_to_hbin = getattr(self._viewer, "_ir_drop_leaf_to_hbin", {})
+
+        def _fallback_resolve_both(name: str) -> Tuple[int, int]:
+            if resolve_both_fn is not None:
+                return resolve_both_fn(name)
+            if resolve_fn is not None:
+                b_res = resolve_fn(name)
+            else:
+                b_val = name_to_bin.get(name) if name_to_bin else None
+                if b_val is None and leaf_to_bin:
+                    leaf = name.rsplit("/", 1)[-1] if "/" in name else name
+                    b_val = leaf_to_bin.get(leaf)
+                b_res = b_val if b_val is not None else -1
+            if b_res < 0:
+                return -1, -1
+            hb_val = name_to_hbin.get(name) if name_to_hbin else None
+            if hb_val is None and leaf_to_hbin:
+                leaf = name.rsplit("/", 1)[-1] if "/" in name else name
+                hb_val = leaf_to_hbin.get(leaf)
+            if hb_val is None and hasattr(report, "histogram_bin_index"):
+                rec = records.get(name)
+                if rec is not None:
+                    hb_val = report.histogram_bin_index(rec[0])
+            return b_res, (hb_val if hb_val is not None else -1)
 
         brushes = []
         pens = []
@@ -320,67 +370,100 @@ class RenderThread(QThread):
 
             LOD_BUDGET = 8000
             stride = max(1, (num_vis + LOD_BUDGET - 1) // LOD_BUDGET)
-            sampled_indices = vis_indices[::stride] if stride > 1 else vis_indices
 
             all_insts = search._insts
             inst_bins = getattr(self._viewer, "_ir_drop_inst_bins", None)
-            if inst_bins is None or len(inst_bins) != len(all_insts):
+            inst_hbins = getattr(self._viewer, "_ir_drop_inst_hbins", None)
+            if (
+                inst_bins is None
+                or len(inst_bins) != len(all_insts)
+                or inst_hbins is None
+                or len(inst_hbins) != len(all_insts)
+            ):
                 inst_bins = np.full(len(all_insts), -2, dtype=np.int8)
+                inst_hbins = np.full(len(all_insts), -2, dtype=np.int8)
                 self._viewer._ir_drop_inst_bins = inst_bins
+                self._viewer._ir_drop_inst_hbins = inst_hbins
 
             bins_to_draw: Tuple[List[int], ...] = ([], [], [], [], [])
             total_matched = 0
-            for k, raw_idx in enumerate(sampled_indices):
-                if k % 2000 == 0 and self._restart:
-                    return
-                i = int(raw_idx)
-                b = int(inst_bins[i])
-                if b == -2:
-                    name = all_insts[i].getName()
-                    if resolve_fn is not None:
-                        b = resolve_fn(name)
-                    else:
-                        b_val = name_to_bin.get(name) if name_to_bin else None
-                        if b_val is None and leaf_to_bin:
-                            leaf = name.rsplit("/", 1)[-1] if "/" in name else name
-                            b_val = leaf_to_bin.get(leaf)
-                        b = b_val if b_val is not None else -1
-                    inst_bins[i] = b
-                if 0 <= b < 5:
-                    bins_to_draw[b].append(i)
-                    total_matched += 1
+            resolve_pair = resolve_both_fn if resolve_both_fn is not None else _fallback_resolve_both
 
-            # If strided sampling hit mostly filler/unreported cells, scan remaining visible instances
-            # up to LOD_BUDGET matched cells so sparse or filler-heavy designs still render all colors.
-            if stride > 1 and total_matched < min(1000, LOD_BUDGET):
-                for k, raw_idx in enumerate(vis_indices):
-                    if k % 4000 == 0 and self._restart:
+            if selected_hbin is not None:
+                # Fast path if all visible instances have already been resolved: pure C/NumPy vector mask
+                if not np.any(inst_bins[vis_indices] == -2):
+                    matched_vis = vis_indices[inst_hbins[vis_indices] == selected_hbin]
+                    bin_stride = max(1, (len(matched_vis) + LOD_BUDGET - 1) // LOD_BUDGET)
+                    if bin_stride > 1:
+                        matched_vis = matched_vis[::bin_stride]
+                    for raw_idx in matched_vis:
+                        i = int(raw_idx)
+                        b = int(inst_bins[i])
+                        if 0 <= b < 5:
+                            bins_to_draw[b].append(i)
+                            total_matched += 1
+                else:
+                    expected_count = getattr(selected_bin, "count", 0) if selected_bin is not None else 0
+                    target_max = min(expected_count, LOD_BUDGET) if expected_count > 0 else LOD_BUDGET
+                    for k, raw_idx in enumerate(vis_indices):
+                        if k % 4000 == 0 and self._restart:
+                            return
+                        i = int(raw_idx)
+                        b = int(inst_bins[i])
+                        hb = int(inst_hbins[i])
+                        if b == -2:
+                            b, hb = resolve_pair(all_insts[i].getName())
+                            inst_bins[i] = b
+                            inst_hbins[i] = hb
+                        if hb == selected_hbin and 0 <= b < 5:
+                            bins_to_draw[b].append(i)
+                            total_matched += 1
+                            if total_matched >= target_max:
+                                break
+            else:
+                sampled_indices = vis_indices[::stride] if stride > 1 else vis_indices
+                for k, raw_idx in enumerate(sampled_indices):
+                    if k % 2000 == 0 and self._restart:
                         return
-                    if k % stride == 0:
-                        continue
                     i = int(raw_idx)
                     b = int(inst_bins[i])
                     if b == -2:
-                        name = all_insts[i].getName()
-                        if resolve_fn is not None:
-                            b = resolve_fn(name)
-                        else:
-                            b_val = name_to_bin.get(name) if name_to_bin else None
-                            if b_val is None and leaf_to_bin:
-                                leaf = name.rsplit("/", 1)[-1] if "/" in name else name
-                                b_val = leaf_to_bin.get(leaf)
-                            b = b_val if b_val is not None else -1
+                        b, hb = resolve_pair(all_insts[i].getName())
                         inst_bins[i] = b
+                        inst_hbins[i] = hb
                     if 0 <= b < 5:
                         bins_to_draw[b].append(i)
                         total_matched += 1
-                        if total_matched >= LOD_BUDGET:
-                            break
+
+                # If strided sampling hit mostly filler/unreported cells, scan remaining visible instances
+                # up to LOD_BUDGET matched cells so sparse or filler-heavy designs still render all colors.
+                if stride > 1 and total_matched < min(1000, LOD_BUDGET):
+                    for k, raw_idx in enumerate(vis_indices):
+                        if k % 4000 == 0 and self._restart:
+                            return
+                        if k % stride == 0:
+                            continue
+                        i = int(raw_idx)
+                        b = int(inst_bins[i])
+                        if b == -2:
+                            b, hb = resolve_pair(all_insts[i].getName())
+                            inst_bins[i] = b
+                            inst_hbins[i] = hb
+                        if 0 <= b < 5:
+                            bins_to_draw[b].append(i)
+                            total_matched += 1
+                            if total_matched >= LOD_BUDGET:
+                                break
 
             painter.save()
             if stride > 1:
-                eff_stride = max(1, num_vis // max(total_matched, 1)) if total_matched > 0 else stride
-                scale = min(float(max(stride, eff_stride)) ** 0.48, 7.0)
+                if selected_hbin is not None:
+                    bin_total = getattr(selected_bin, "count", total_matched) if selected_bin is not None else total_matched
+                    bin_stride = max(1, (bin_total + LOD_BUDGET - 1) // LOD_BUDGET)
+                    scale = min(float(bin_stride) ** 0.48, 4.0) if bin_stride > 1 else 1.0
+                else:
+                    eff_stride = max(1, num_vis // max(total_matched, 1)) if total_matched > 0 else stride
+                    scale = min(float(max(stride, eff_stride)) ** 0.48, 7.0)
                 min_dbu = int(3.5 / max(ppd, 1e-6))
                 for b_idx in range(len(IR_DROP_PALETTE)):
                     idx_list = bins_to_draw[b_idx]
@@ -421,7 +504,8 @@ class RenderThread(QThread):
             return
         painter.save()
         last_idx = None
-        step = max(1, len(insts) // 8000)
+        step = 1 if selected_hbin is not None else max(1, len(insts) // 8000)
+        resolve_pair = resolve_both_fn if resolve_both_fn is not None else _fallback_resolve_both
         for index in range(0, len(insts), step):
             if index % 2000 == 0 and self._restart:
                 break
@@ -429,14 +513,10 @@ class RenderThread(QThread):
             if inst.getMaster().isMacro():
                 continue
             name = inst.getName()
-            if resolve_fn is not None:
-                idx = resolve_fn(name)
-            else:
-                idx = name_to_bin.get(name) if name_to_bin else None
-                if idx is None and leaf_to_bin:
-                    leaf = name.rsplit("/", 1)[-1] if "/" in name else name
-                    idx = leaf_to_bin.get(leaf)
+            idx, hb_idx = resolve_pair(name)
             if idx is None or idx < 0:
+                continue
+            if selected_hbin is not None and hb_idx != selected_hbin:
                 continue
             box = inst.getBBox().getBox()
             if box.area() <= 0:
@@ -534,17 +614,24 @@ class RenderThread(QThread):
         macro_pen.setCosmetic(True)
         macro_brush = QBrush(options.macroColor())
 
+        resolve_both_fn = getattr(self._viewer, "resolve_ir_drop_bin_and_hbin", None)
         resolve_fn = getattr(self._viewer, "resolve_ir_drop_bin", None)
+        selected_hbin = None
         if ir_drop_active:
             ensure_fn = getattr(self._viewer, "_ensure_ir_drop_color_cache", None)
             if ensure_fn is not None:
                 ensure_fn()
+            report = getattr(self._viewer, "_ir_drop_data", None)
+            selected_hbin, _ = self._get_selected_hbin_info(report)
             name_to_bin = getattr(self._viewer, "_ir_drop_name_to_bin", None)
-            if name_to_bin is None and resolve_fn is None:
-                report = getattr(self._viewer, "_ir_drop_data", None)
-                records = getattr(report, "records_by_instance", {}) if report else {}
+            name_to_hbin = getattr(self._viewer, "_ir_drop_name_to_hbin", None)
+            records = getattr(report, "records_by_instance", {}) if report else {}
+            if name_to_bin is None and resolve_fn is None and resolve_both_fn is None:
                 name_to_bin = {k: report.color_index(v[0]) for k, v in records.items()} if report else {}
+            if name_to_hbin is None and resolve_both_fn is None and report and hasattr(report, "histogram_bin_index"):
+                name_to_hbin = {k: report.histogram_bin_index(v[0]) for k, v in records.items()}
             leaf_to_bin = getattr(self._viewer, "_ir_drop_leaf_to_bin", {})
+            leaf_to_hbin = getattr(self._viewer, "_ir_drop_leaf_to_hbin", {})
 
             bin_pens = []
             bin_brushes = []
@@ -556,12 +643,14 @@ class RenderThread(QThread):
                 bin_brushes.append(QBrush(c))
         else:
             name_to_bin = {}
+            name_to_hbin = {}
             leaf_to_bin = {}
+            leaf_to_hbin = {}
             bin_pens = []
             bin_brushes = []
 
         last_mode = None  # "macro", "cell", or ("ir_cell", bin_idx)
-        std_stride = max(1, len(insts) // 8000)
+        std_stride = 1 if (ir_drop_active and selected_hbin is not None) else max(1, len(insts) // 8000)
 
         for idx, inst in enumerate(insts):
             if idx % 1000 == 0 and self._restart:
@@ -597,14 +686,23 @@ class RenderThread(QThread):
                 bbox = inst.getBBox().getBox()
                 if ir_drop_active:
                     name = inst.getName()
-                    if resolve_fn is not None:
+                    if resolve_both_fn is not None:
+                        bin_idx, hbin_idx = resolve_both_fn(name)
+                    elif resolve_fn is not None:
                         bin_idx = resolve_fn(name)
+                        hbin_idx = name_to_hbin.get(name, -1) if name_to_hbin else -1
                     else:
                         bin_idx = name_to_bin.get(name) if name_to_bin else None
                         if bin_idx is None and leaf_to_bin:
                             leaf = name.rsplit("/", 1)[-1] if "/" in name else name
                             bin_idx = leaf_to_bin.get(leaf)
+                        hbin_idx = name_to_hbin.get(name) if name_to_hbin else None
+                        if hbin_idx is None and leaf_to_hbin:
+                            leaf = name.rsplit("/", 1)[-1] if "/" in name else name
+                            hbin_idx = leaf_to_hbin.get(leaf)
                     if bin_idx is not None and bin_idx < 0:
+                        bin_idx = None
+                    if selected_hbin is not None and hbin_idx != selected_hbin:
                         bin_idx = None
 
                     current_mode = ("ir_cell", bin_idx)

@@ -139,6 +139,8 @@ class LayoutViewer(QWidget):
         self._timing_connectivity: Dict[str, List[Point]] = {}
         self._ir_drop_data: Optional[Any] = None
         self._ir_drop_map_visible: bool = False
+        self._ir_drop_selected_bin: Optional[Any] = None
+        self._ir_drop_selected_hbin_idx: Optional[int] = None
         self._ir_drop_heatmap_image: Optional[QImage] = None
         self._ir_drop_heatmap_core: Optional[Rect] = None
         self._ir_drop_grid_drop: Optional[np.ndarray] = None
@@ -153,7 +155,10 @@ class LayoutViewer(QWidget):
         self._instance_resolve_cache: Dict[str, Any] = {}
         self._ir_drop_name_to_bin: Dict[str, int] = {}
         self._ir_drop_leaf_to_bin: Dict[str, int] = {}
+        self._ir_drop_name_to_hbin: Dict[str, int] = {}
+        self._ir_drop_leaf_to_hbin: Dict[str, int] = {}
         self._ir_drop_inst_bins: Optional[np.ndarray] = None
+        self._ir_drop_inst_hbins: Optional[np.ndarray] = None
         self._ir_drop_prefixes: Tuple[str, ...] = ()
         self._ir_drop_cache_ready: bool = False
 
@@ -223,6 +228,7 @@ class LayoutViewer(QWidget):
         self._ir_drop_heatmap_attempted = False
         self._instance_resolve_cache = {}
         self._ir_drop_inst_bins = None
+        self._ir_drop_inst_hbins = None
         if chip and chip.getTech():
             self._options.tech_init(chip.getTech())
         if chip and chip.getBlock():
@@ -664,6 +670,8 @@ class LayoutViewer(QWidget):
         if self._ir_drop_data is report_data and (report_data is None or self._ir_drop_name_to_bin or self._ir_drop_prefixes):
             return
         self._ir_drop_data = report_data
+        self._ir_drop_selected_bin = None
+        self._ir_drop_selected_hbin_idx = None
         self._ir_drop_heatmap_image = None
         self._ir_drop_heatmap_core = None
         self._ir_drop_grid_drop = None
@@ -671,10 +679,42 @@ class LayoutViewer(QWidget):
         self._ir_drop_heatmap_attempted = False
         self._instance_resolve_cache = {}
         self._ir_drop_inst_bins = None
+        self._ir_drop_inst_hbins = None
         self._build_ir_drop_color_cache()
         if self._ir_drop_map_visible:
             self.fullRepaint()
         self.update()
+
+    def setIRDropSelectedBin(self, selected_bin: Optional[Any]) -> None:
+        """Sets the active histogram bin filter for IR-drop standard cell coloring in O(1) time without rebuilding caches."""
+        hbin_idx: Optional[int] = None
+        if selected_bin is not None:
+            report = self._ir_drop_data
+            bins = getattr(report, "bins", None) if report is not None else None
+            if bins:
+                try:
+                    hbin_idx = bins.index(selected_bin)
+                except ValueError:
+                    for idx, b in enumerate(bins):
+                        if (
+                            abs(b.minimum_mv - selected_bin.minimum_mv) < 1e-6
+                            and abs(b.maximum_mv - selected_bin.maximum_mv) < 1e-6
+                        ):
+                            hbin_idx = idx
+                            break
+            if hbin_idx is None and hasattr(selected_bin, "bin_index"):
+                hbin_idx = int(selected_bin.bin_index)
+
+        if self._ir_drop_selected_bin is selected_bin and self._ir_drop_selected_hbin_idx == hbin_idx:
+            return
+        self._ir_drop_selected_bin = selected_bin
+        self._ir_drop_selected_hbin_idx = hbin_idx
+        if self._ir_drop_map_visible:
+            self.fullRepaint()
+        self.update()
+
+    def getIRDropSelectedBin(self) -> Optional[Any]:
+        return self._ir_drop_selected_bin
 
     def setIRDropMapVisible(self, visible: bool) -> None:
         new_vis = bool(visible)
@@ -923,10 +963,13 @@ class LayoutViewer(QWidget):
     def _build_ir_drop_color_cache(self) -> None:
         """Initializes fast O(1) instance-name to IR-drop bin mapping without blocking the UI thread."""
         self._ir_drop_inst_bins = None
+        self._ir_drop_inst_hbins = None
         self._ir_drop_cache_ready = False
         if self._ir_drop_data is None:
             self._ir_drop_name_to_bin = {}
             self._ir_drop_leaf_to_bin = {}
+            self._ir_drop_name_to_hbin = {}
+            self._ir_drop_leaf_to_hbin = {}
             self._ir_drop_prefixes = ()
             self._ir_drop_cache_ready = True
             return
@@ -936,6 +979,8 @@ class LayoutViewer(QWidget):
         if not records:
             self._ir_drop_name_to_bin = {}
             self._ir_drop_leaf_to_bin = {}
+            self._ir_drop_name_to_hbin = {}
+            self._ir_drop_leaf_to_hbin = {}
             self._ir_drop_prefixes = ()
             self._ir_drop_cache_ready = True
             return
@@ -958,12 +1003,14 @@ class LayoutViewer(QWidget):
         if len(records) > 5000:
             self._ir_drop_name_to_bin = {}
             self._ir_drop_leaf_to_bin = {}
+            self._ir_drop_name_to_hbin = {}
+            self._ir_drop_leaf_to_hbin = {}
             return
 
         self._ensure_ir_drop_color_cache()
 
     def _ensure_ir_drop_color_cache(self) -> None:
-        """Populates full O(1) instance-name and leaf-name to IR-drop bin dictionaries.
+        """Populates full O(1) instance-name and leaf-name to IR-drop palette and histogram bin dictionaries.
         Safe to invoke from the background RenderThread so the main GUI thread never blocks.
         """
         if getattr(self, "_ir_drop_cache_ready", False):
@@ -973,6 +1020,8 @@ class LayoutViewer(QWidget):
         if report is None:
             self._ir_drop_name_to_bin = {}
             self._ir_drop_leaf_to_bin = {}
+            self._ir_drop_name_to_hbin = {}
+            self._ir_drop_leaf_to_hbin = {}
             self._ir_drop_cache_ready = True
             return
 
@@ -980,120 +1029,195 @@ class LayoutViewer(QWidget):
         if not records:
             self._ir_drop_name_to_bin = {}
             self._ir_drop_leaf_to_bin = {}
+            self._ir_drop_name_to_hbin = {}
+            self._ir_drop_leaf_to_hbin = {}
             self._ir_drop_cache_ready = True
             return
 
         name_to_bin: Dict[str, int] = {}
         leaf_to_bin: Dict[str, int] = {}
+        name_to_hbin: Dict[str, int] = {}
+        leaf_to_hbin: Dict[str, int] = {}
 
+        bin_instances = getattr(report, "bin_instances", None)
         palette_bins = getattr(report, "palette_bin_instances", None)
-        if palette_bins and len(palette_bins) == len(IR_DROP_PALETTE) and any(palette_bins):
-            pairs_iter = (
-                (inst_name, bin_idx)
+        bins_list = getattr(report, "bins", None)
+
+        if bin_instances and bins_list and len(bin_instances) == len(bins_list) and any(bin_instances):
+            inst_to_pbin: Dict[str, int] = {}
+            if palette_bins and len(palette_bins) == len(IR_DROP_PALETTE) and any(palette_bins):
+                for p_idx, p_list in enumerate(palette_bins):
+                    inst_to_pbin.update(dict.fromkeys(p_list, p_idx))
+            num_hbins = len(bin_instances)
+            num_pbins = len(IR_DROP_PALETTE)
+            triples_iter = (
+                (
+                    inst_name,
+                    inst_to_pbin.get(inst_name, min(max(int((hbin_idx + 0.5) * num_pbins / num_hbins), 0), num_pbins - 1)),
+                    hbin_idx,
+                )
+                for hbin_idx in range(num_hbins - 1, -1, -1)
+                for inst_name in bin_instances[hbin_idx]
+            )
+        elif palette_bins and len(palette_bins) == len(IR_DROP_PALETTE) and any(palette_bins):
+            has_hbin = hasattr(report, "histogram_bin_index")
+            triples_iter = (
+                (
+                    inst_name,
+                    bin_idx,
+                    report.histogram_bin_index(records[inst_name][0]) if (has_hbin and inst_name in records) else bin_idx,
+                )
                 for bin_idx in range(len(palette_bins) - 1, -1, -1)
                 for inst_name in palette_bins[bin_idx]
             )
         else:
-            pairs_iter = (
-                (inst_name, report.color_index(rec[0]))
+            has_hbin = hasattr(report, "histogram_bin_index")
+            triples_iter = (
+                (
+                    inst_name,
+                    report.color_index(rec[0]),
+                    report.histogram_bin_index(rec[0]) if has_hbin else 0,
+                )
                 for inst_name, rec in records.items()
             )
 
-        for inst_name, bin_idx in pairs_iter:
+        for inst_name, bin_idx, hbin_idx in triples_iter:
             name_to_bin[inst_name] = bin_idx
+            name_to_hbin[inst_name] = hbin_idx
 
             norm = inst_name.replace(r"\/", "/") if "\\" in inst_name else inst_name
             if "." in norm and "/" not in norm:
                 norm = norm.replace(".", "/")
                 name_to_bin.setdefault(norm, bin_idx)
+                name_to_hbin.setdefault(norm, hbin_idx)
 
             if "[" in norm and r"\[" not in norm:
-                name_to_bin.setdefault(norm.replace("[", r"\[").replace("]", r"\]"), bin_idx)
+                esc_norm = norm.replace("[", r"\[").replace("]", r"\]")
+                name_to_bin.setdefault(esc_norm, bin_idx)
+                name_to_hbin.setdefault(esc_norm, hbin_idx)
             elif r"\[" in norm:
                 unesc = norm.replace(r"\[", "[").replace(r"\]", "]")
                 name_to_bin.setdefault(unesc, bin_idx)
+                name_to_hbin.setdefault(unesc, hbin_idx)
                 norm = unesc
 
             if "/" in norm:
                 sub = norm.split("/", 1)[1]
                 name_to_bin.setdefault(sub, bin_idx)
+                name_to_hbin.setdefault(sub, hbin_idx)
                 if "[" in sub:
-                    name_to_bin.setdefault(sub.replace("[", r"\[").replace("]", r"\]"), bin_idx)
+                    esc_sub = sub.replace("[", r"\[").replace("]", r"\]")
+                    name_to_bin.setdefault(esc_sub, bin_idx)
+                    name_to_hbin.setdefault(esc_sub, hbin_idx)
                 if "/" in sub:
                     sub2 = sub.split("/", 1)[1]
                     name_to_bin.setdefault(sub2, bin_idx)
+                    name_to_hbin.setdefault(sub2, hbin_idx)
                     if "[" in sub2:
-                        name_to_bin.setdefault(sub2.replace("[", r"\[").replace("]", r"\]"), bin_idx)
+                        esc_sub2 = sub2.replace("[", r"\[").replace("]", r"\]")
+                        name_to_bin.setdefault(esc_sub2, bin_idx)
+                        name_to_hbin.setdefault(esc_sub2, hbin_idx)
                 leaf = norm.rsplit("/", 1)[-1]
             else:
                 leaf = norm
 
             leaf_to_bin.setdefault(leaf, bin_idx)
+            leaf_to_hbin.setdefault(leaf, hbin_idx)
             if "[" in leaf:
-                leaf_to_bin.setdefault(leaf.replace("[", r"\[").replace("]", r"\]"), bin_idx)
+                esc_leaf = leaf.replace("[", r"\[").replace("]", r"\]")
+                leaf_to_bin.setdefault(esc_leaf, bin_idx)
+                leaf_to_hbin.setdefault(esc_leaf, hbin_idx)
             leaf_bus = _canonicalize_bus(leaf)
             if leaf_bus != leaf:
                 leaf_to_bin.setdefault(leaf_bus, bin_idx)
+                leaf_to_hbin.setdefault(leaf_bus, hbin_idx)
 
         self._ir_drop_name_to_bin = name_to_bin
         self._ir_drop_leaf_to_bin = leaf_to_bin
+        self._ir_drop_name_to_hbin = name_to_hbin
+        self._ir_drop_leaf_to_hbin = leaf_to_hbin
         self._ir_drop_cache_ready = True
 
-    def resolve_ir_drop_bin(self, name: str) -> int:
-        """Fast O(1) memoized lookup returning palette bin 0..4, or -1 if instance has no IR-drop record."""
+    def resolve_ir_drop_bin_and_hbin(self, name: str) -> Tuple[int, int]:
+        """Fast O(1) memoized lookup returning (palette_bin 0..4, histogram_bin 0..N-1), or (-1, -1)."""
         if not getattr(self, "_ir_drop_cache_ready", False):
             self._ensure_ir_drop_color_cache()
 
         name_to_bin = self._ir_drop_name_to_bin
-        cached = name_to_bin.get(name)
-        if cached is not None:
-            return cached
+        name_to_hbin = self._ir_drop_name_to_hbin
+        cached_b = name_to_bin.get(name)
+        if cached_b is not None:
+            return cached_b, name_to_hbin.get(name, -1)
 
         report = self._ir_drop_data
         if report is None:
-            return -1
+            return -1, -1
 
         leaf_to_bin = self._ir_drop_leaf_to_bin
+        leaf_to_hbin = self._ir_drop_leaf_to_hbin
 
         norm = name.replace(r"\/", "/") if "\\" in name else name
         if r"\[" in norm:
             norm = norm.replace(r"\[", "[").replace(r"\]", "]")
 
         b = name_to_bin.get(norm)
+        hb = name_to_hbin.get(norm, -1) if b is not None else -1
         if b is None and "/" in norm:
             sub = norm.split("/", 1)[1]
             b = name_to_bin.get(sub)
+            hb = name_to_hbin.get(sub, -1) if b is not None else -1
             if b is None and "/" in sub:
-                b = name_to_bin.get(sub.split("/", 1)[1])
+                sub2 = sub.split("/", 1)[1]
+                b = name_to_bin.get(sub2)
+                hb = name_to_hbin.get(sub2, -1) if b is not None else -1
             leaf = norm.rsplit("/", 1)[-1]
         else:
             leaf = norm
 
         if b is None and self._ir_drop_prefixes:
             for pref in self._ir_drop_prefixes:
-                b = name_to_bin.get(pref + norm)
+                cand_key = pref + norm
+                b = name_to_bin.get(cand_key)
                 if b is not None:
+                    hb = name_to_hbin.get(cand_key, -1)
                     break
 
         if b is None and leaf_to_bin:
             b = leaf_to_bin.get(leaf)
-            if b is None:
-                b = leaf_to_bin.get(_canonicalize_bus(leaf))
+            if b is not None:
+                hb = leaf_to_hbin.get(leaf, -1)
+            else:
+                c_leaf = _canonicalize_bus(leaf)
+                b = leaf_to_bin.get(c_leaf)
+                if b is not None:
+                    hb = leaf_to_hbin.get(c_leaf, -1)
             if b is None and ("CDN_MBIT_" in leaf or "_MB_" in leaf):
                 mbit_part = leaf.split("CDN_MBIT_", 1)[1] if "CDN_MBIT_" in leaf else leaf
                 best_b = -1
+                best_hb = -1
                 for sub_leaf in mbit_part.split("_MB_"):
                     sb = leaf_to_bin.get(sub_leaf, -1)
+                    shb = leaf_to_hbin.get(sub_leaf, -1)
                     if sb < 0:
-                        sb = leaf_to_bin.get(_canonicalize_bus(sub_leaf), -1)
-                    if sb > best_b:
+                        c_sub = _canonicalize_bus(sub_leaf)
+                        sb = leaf_to_bin.get(c_sub, -1)
+                        shb = leaf_to_hbin.get(c_sub, -1)
+                    if sb > best_b or (sb == best_b and shb > best_hb):
                         best_b = sb
+                        best_hb = shb
                 if best_b >= 0:
                     b = best_b
+                    hb = best_hb
 
-        res = b if b is not None else -1
-        name_to_bin[name] = res
-        return res
+        res_b = b if b is not None else -1
+        res_hb = hb if b is not None else -1
+        name_to_bin[name] = res_b
+        name_to_hbin[name] = res_hb
+        return res_b, res_hb
+
+    def resolve_ir_drop_bin(self, name: str) -> int:
+        """Fast O(1) memoized lookup returning palette bin 0..4, or -1 if instance has no IR-drop record."""
+        return self.resolve_ir_drop_bin_and_hbin(name)[0]
 
     def _resolve_timing_path_points(self, path: Any) -> List[Point]:
         """Resolves ordered physical DBU points along the timing path with 2-tier caching."""
@@ -1609,7 +1733,15 @@ class LayoutViewer(QWidget):
         title_font = QFont("Segoe UI", 8, QFont.Bold)
         painter.setFont(title_font)
         painter.setPen(QColor(230, 235, 245))
-        painter.drawText(x + 10, y + 16, "IR-Drop Heatmap")
+        selected_bin = getattr(self, "_ir_drop_selected_bin", None)
+        if selected_bin is not None:
+            painter.drawText(
+                x + 10,
+                y + 16,
+                f"IR-Drop Bin: {selected_bin.minimum_mv:.1f}-{selected_bin.maximum_mv:.1f} mV",
+            )
+        else:
+            painter.drawText(x + 10, y + 16, "IR-Drop Heatmap")
 
         stat_font = QFont("Segoe UI", 7, QFont.Normal)
         painter.setFont(stat_font)
@@ -1633,6 +1765,16 @@ class LayoutViewer(QWidget):
         painter.setPen(QPen(QColor(40, 50, 65), 1))
         painter.setBrush(grad)
         painter.drawRect(QRectF(bar_x, bar_y, bar_w, bar_h))
+
+        if selected_bin is not None and report.maximum_mv > report.minimum_mv:
+            span = report.maximum_mv - report.minimum_mv
+            f0 = min(max((selected_bin.minimum_mv - report.minimum_mv) / span, 0.0), 1.0)
+            f1 = min(max((selected_bin.maximum_mv - report.minimum_mv) / span, 0.0), 1.0)
+            sel_x = bar_x + f0 * bar_w
+            sel_w = max(4.0, (f1 - f0) * bar_w)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#00E5FF"), 2))
+            painter.drawRect(QRectF(sel_x, bar_y - 1, sel_w, bar_h + 2))
 
         # Tick Labels
         tick_font = QFont("Segoe UI", 7)
