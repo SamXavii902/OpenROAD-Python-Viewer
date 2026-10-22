@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 
 IR_DROP_PALETTE = ("#39B7A5", "#419BC4", "#5E7DCE", "#8B68C6", "#D8588A")
@@ -93,16 +94,214 @@ class IRDropReportData:
         if not self.bins:
             return 0
         bin_count = len(self.bins)
+        if value_mv <= self.bins[0].minimum_mv + 1e-6:
+            return 0
+        if value_mv >= self.bins[-1].maximum_mv - 1e-6:
+            return bin_count - 1
+
+        for i, b in enumerate(self.bins):
+            if b.minimum_mv - 1e-6 <= value_mv < b.maximum_mv:
+                return i
+            if i == bin_count - 1 and value_mv <= b.maximum_mv + 1e-6:
+                return i
+
         if self.maximum_mv > self.minimum_mv:
             fraction = (value_mv - self.minimum_mv) / (self.maximum_mv - self.minimum_mv)
-            idx = min(max(int(fraction * bin_count), 0), bin_count - 1)
-            b = self.bins[idx]
-            if b.minimum_mv - 1e-6 <= value_mv <= b.maximum_mv + 1e-6:
-                return idx
-        for i, b in enumerate(self.bins):
-            if b.minimum_mv - 1e-6 <= value_mv <= b.maximum_mv + 1e-6:
-                return i
+            return min(max(int(fraction * bin_count), 0), bin_count - 1)
         return bin_count - 1
+
+    def set_step_size(self, step_mv: float) -> bool:
+        """Divides the voltage drop distribution into equal steps of size step_mv."""
+        if step_mv <= 0.0 or not self.records_by_instance:
+            return False
+        span = self.maximum_mv - self.minimum_mv
+        if span <= 0.0:
+            return self.set_custom_ranges([(self.minimum_mv, self.maximum_mv)])
+
+        n_steps = max(1, int(math.ceil(span / step_mv)))
+        ranges: List[Tuple[float, float]] = []
+        for i in range(n_steps):
+            r_min = round(self.minimum_mv + i * step_mv, 4)
+            r_max = round(self.minimum_mv + (i + 1) * step_mv, 4)
+            if i == n_steps - 1:
+                r_max = max(r_max, round(self.maximum_mv, 4))
+            ranges.append((r_min, r_max))
+        return self.set_custom_ranges(ranges)
+
+    def set_custom_ranges(self, ranges: List[Tuple[float, float]]) -> bool:
+        """Divides distribution into custom (min, max) ranges and groups instances accordingly."""
+        if not ranges or not self.records_by_instance:
+            return False
+        # Clean and sort ranges
+        sorted_ranges = sorted([(float(r[0]), float(r[1])) for r in ranges], key=lambda x: x[0])
+        num_bins = len(sorted_ranges)
+        bin_instances: List[List[str]] = [[] for _ in range(num_bins)]
+        values = _RecordValueView(self.records_by_instance)
+
+        for inst in self.ordered_instances:
+            val = values[inst]
+            assigned = -1
+            for i, (b_min, b_max) in enumerate(sorted_ranges):
+                if i == 0 and val < b_min:
+                    assigned = 0
+                    break
+                elif i == num_bins - 1:
+                    if val >= b_min - 1e-6:
+                        assigned = i
+                        break
+                elif b_min - 1e-6 <= val < b_max:
+                    assigned = i
+                    break
+            if assigned < 0:
+                assigned = num_bins - 1 if val >= sorted_ranges[-1][1] else 0
+            bin_instances[assigned].append(inst)
+
+        self.bins = [
+            IRDropBin(
+                minimum_mv=b_min,
+                maximum_mv=b_max,
+                count=len(bin_instances[i]),
+                bin_index=i,
+            )
+            for i, (b_min, b_max) in enumerate(sorted_ranges)
+        ]
+        self.bin_instances = bin_instances
+
+        # Update palette bin instances
+        palette_instances: List[List[str]] = [[] for _ in range(len(IR_DROP_PALETTE))]
+        span = self.maximum_mv - self.minimum_mv
+        if span == 0.0:
+            palette_instances[len(IR_DROP_PALETTE) // 2] = list(self.ordered_instances)
+        else:
+            for inst in self.ordered_instances:
+                val = values[inst]
+                pal_idx = min(max(int((val - self.minimum_mv) / span * len(IR_DROP_PALETTE)), 0), len(IR_DROP_PALETTE) - 1)
+                palette_instances[pal_idx].append(inst)
+        self.palette_bin_instances = palette_instances
+        return True
+
+    def reset_uniform_bins(self, bin_count: int = 24) -> None:
+        """Resets histogram to uniform bins."""
+        if not self.records_by_instance:
+            self.bins = []
+            self.bin_instances = []
+            return
+        span = self.maximum_mv - self.minimum_mv
+        counts = [0] * bin_count
+        bin_instances: List[List[str]] = [[] for _ in range(bin_count)]
+        palette_instances: List[List[str]] = [[] for _ in range(len(IR_DROP_PALETTE))]
+        values = _RecordValueView(self.records_by_instance)
+
+        if span <= 0.0:
+            counts[-1] = len(values)
+            bin_instances[-1] = list(self.ordered_instances)
+            palette_instances[len(IR_DROP_PALETTE) // 2] = list(self.ordered_instances)
+        else:
+            for instance in self.ordered_instances:
+                val = values[instance]
+                idx = min(int((val - self.minimum_mv) / span * bin_count), bin_count - 1)
+                counts[idx] += 1
+                bin_instances[idx].append(instance)
+
+                pal_idx = min(max(int((val - self.minimum_mv) / span * len(IR_DROP_PALETTE)), 0), len(IR_DROP_PALETTE) - 1)
+                palette_instances[pal_idx].append(instance)
+
+        self.bins = [
+            IRDropBin(
+                minimum_mv=self.minimum_mv + span * idx / bin_count,
+                maximum_mv=self.minimum_mv + span * (idx + 1) / bin_count,
+                count=counts[idx],
+                bin_index=idx,
+            )
+            for idx in range(bin_count)
+        ]
+        self.bin_instances = bin_instances
+        self.palette_bin_instances = palette_instances
+
+
+def parse_range_spec(text: str, default_min: float = 0.0, default_max: float = 100.0) -> List[Tuple[float, float]]:
+    """Parses user input string containing either comma-separated cutoffs (e.g. '20, 40, 60')
+    or explicit ranges (e.g. '0-25, 25-50, 50-75, 75+').
+    """
+    text = text.strip()
+    if not text:
+        raise ValueError("Range specification cannot be empty")
+
+    tokens = [t.strip() for t in text.replace(";", ",").split(",") if t.strip()]
+    if not tokens:
+        raise ValueError("No ranges provided")
+
+    # Check if tokens are all single numbers (cutoffs)
+    all_single_numbers = True
+    cutoffs = []
+    for t in tokens:
+        try:
+            val = float(t)
+            cutoffs.append(val)
+        except ValueError:
+            all_single_numbers = False
+            break
+
+    if all_single_numbers:
+        sorted_cutoffs = sorted(set(cutoffs))
+        ranges = []
+        cur = min(default_min, sorted_cutoffs[0])
+        for c in sorted_cutoffs:
+            if c > cur:
+                ranges.append((cur, c))
+                cur = c
+        if default_max > cur:
+            ranges.append((cur, default_max))
+        elif not ranges:
+            ranges.append((default_min, max(default_max, sorted_cutoffs[-1])))
+        return ranges
+
+    # Explicit ranges like "0-20, 20-50, 50+"
+    ranges = []
+    for token in tokens:
+        token = token.strip()
+        if token.endswith("+"):
+            val = float(token[:-1].strip())
+            ranges.append((val, max(default_max, val + 10.0)))
+            continue
+        if token.startswith(">"):
+            val = float(token[1:].strip())
+            ranges.append((val, max(default_max, val + 10.0)))
+            continue
+        if token.startswith("<"):
+            val = float(token[1:].strip())
+            ranges.append((min(default_min, val - 10.0), val))
+            continue
+
+        sep = None
+        for s in (" to ", ":", "-"):
+            if s in token:
+                if s == "-":
+                    parts = token.split("-")
+                    if len(parts) == 2 and parts[0] and parts[1]:
+                        sep = "-"
+                        break
+                else:
+                    sep = s
+                    break
+
+        if sep:
+            if sep == "-":
+                parts = token.rsplit("-", 1)
+            else:
+                parts = token.split(sep, 1)
+            r_lo = float(parts[0].strip().lstrip("[").lstrip("("))
+            r_hi = float(parts[1].strip().rstrip("]").rstrip(")"))
+            if r_lo >= r_hi:
+                raise ValueError(f"Invalid range '{token}': min ({r_lo}) >= max ({r_hi})")
+            ranges.append((r_lo, r_hi))
+        else:
+            val = float(token)
+            ranges.append((val, val + 10.0))
+
+    if not ranges:
+        raise ValueError("Could not parse any valid ranges")
+    return ranges
 
 
 class IRDropParser:

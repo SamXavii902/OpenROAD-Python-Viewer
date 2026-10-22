@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import math
 import os
 import time
@@ -11,6 +12,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QDockWidget,
     QFileDialog,
@@ -19,6 +21,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QTabWidget,
@@ -28,7 +32,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from rishi.irdrop.report import IR_DROP_PALETTE, IRDropBin, IRDropParser, IRDropReportData
+from rishi.irdrop.report import (
+    IR_DROP_PALETTE,
+    IRDropBin,
+    IRDropParser,
+    IRDropReportData,
+    parse_range_spec,
+)
 
 
 class IRDropLoadThread(QThread):
@@ -340,12 +350,126 @@ class IRDropWidget(QWidget):
             self._metric_labels[key] = value_label
         root.addLayout(summary)
 
-        # 4. Interactive Distribution Histogram
+        # 4. Histogram Binning Controls Toolbar
+        bin_ctrls = QHBoxLayout()
+        bin_ctrls.setSpacing(6)
+
+        bin_label = QLabel("Binning:")
+        bin_label.setStyleSheet("color: #8E9AA5; font-size: 8pt; font-weight: bold;")
+        bin_ctrls.addWidget(bin_label)
+
+        self._bin_mode_combo = QComboBox()
+        self._bin_mode_combo.addItems(["Auto (24 Bins)", "Step Size (mV)", "Custom Ranges"])
+        self._bin_mode_combo.setToolTip("Choose how histogram voltage drop ranges are grouped")
+        self._bin_mode_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #151821;
+                color: #E2E8F0;
+                border: 1px solid #282C37;
+                border-radius: 3px;
+                padding: 3px 8px;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1A1D24;
+                color: #E2E8F0;
+                selection-background-color: #00E5FF;
+                selection-color: #000000;
+            }
+        """)
+        self._bin_mode_combo.currentIndexChanged.connect(self._on_bin_mode_changed)
+        bin_ctrls.addWidget(self._bin_mode_combo)
+
+        self._bin_step_spin = QDoubleSpinBox()
+        self._bin_step_spin.setRange(0.1, 10000.0)
+        self._bin_step_spin.setDecimals(1)
+        self._bin_step_spin.setSuffix(" mV")
+        self._bin_step_spin.setValue(10.0)
+        self._bin_step_spin.setToolTip("Divide histogram into equal steps of this size (mV)")
+        self._bin_step_spin.setStyleSheet("""
+            QDoubleSpinBox {
+                background-color: #151821;
+                color: #E2E8F0;
+                border: 1px solid #282C37;
+                border-radius: 3px;
+                padding: 3px 6px;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+            }
+        """)
+        self._bin_step_spin.hide()
+        bin_ctrls.addWidget(self._bin_step_spin)
+
+        self._bin_ranges_edit = QLineEdit()
+        self._bin_ranges_edit.setPlaceholderText("e.g. 20, 40, 60, 80 or 0-25, 25-50, 50-75, 75+")
+        self._bin_ranges_edit.setToolTip("Enter comma-separated cutoffs (e.g. 20, 40, 60) or range pairs (e.g. 0-25, 25-50, 50-75)")
+        self._bin_ranges_edit.setStyleSheet("""
+            QLineEdit {
+                background-color: #151821;
+                color: #E2E8F0;
+                border: 1px solid #282C37;
+                border-radius: 3px;
+                padding: 3px 8px;
+                font-family: 'Segoe UI';
+                font-size: 8pt;
+            }
+            QLineEdit:focus {
+                border: 1px solid #00E5FF;
+            }
+        """)
+        self._bin_ranges_edit.returnPressed.connect(self._on_apply_bins)
+        self._bin_ranges_edit.hide()
+        bin_ctrls.addWidget(self._bin_ranges_edit, 1)
+
+        self._apply_bins_btn = QPushButton("Apply Bins")
+        self._apply_bins_btn.setToolTip("Recalculate histogram distribution with the chosen binning parameters")
+        self._apply_bins_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #262B38;
+                color: #00E5FF;
+                border: 1px solid #00E5FF;
+                border-radius: 3px;
+                padding: 3px 10px;
+                font-weight: bold;
+                font-size: 8pt;
+            }
+            QPushButton:hover {
+                background-color: #00E5FF;
+                color: #000000;
+            }
+        """)
+        self._apply_bins_btn.clicked.connect(self._on_apply_bins)
+        self._apply_bins_btn.hide()
+        bin_ctrls.addWidget(self._apply_bins_btn)
+
+        self._reset_bins_btn = QPushButton("Reset Bins")
+        self._reset_bins_btn.setToolTip("Revert histogram to standard 24 uniform bins")
+        self._reset_bins_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1A1D24;
+                color: #A0A8B8;
+                border: 1px solid #282C37;
+                border-radius: 3px;
+                padding: 3px 8px;
+                font-size: 8pt;
+            }
+            QPushButton:hover {
+                background-color: #282C37;
+                color: #E2E8F0;
+            }
+        """)
+        self._reset_bins_btn.clicked.connect(self._on_reset_bins)
+        bin_ctrls.addWidget(self._reset_bins_btn)
+
+        root.addLayout(bin_ctrls)
+
+        # 5. Interactive Distribution Histogram
         self._histogram = IRDropHistogramWidget()
         self._histogram.bin_selected.connect(self._on_bin_selected)
         root.addWidget(self._histogram)
 
-        # 5. Search & Threshold Filter Bar
+        # 6. Search, Threshold, & Export Filter Bar
         controls = QHBoxLayout()
         controls.setSpacing(6)
 
@@ -395,9 +519,35 @@ class IRDropWidget(QWidget):
         reset_btn.setToolTip("Clear search, threshold, and active histogram bin selection")
         reset_btn.clicked.connect(self._reset_filters)
         controls.addWidget(reset_btn)
+
+        self._export_btn = QPushButton("Export List...")
+        self._export_btn.setToolTip("Export the resultant filtered cells to CSV or Excel (.xlsx) including coordinates")
+        self._export_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1E293B;
+                color: #38BDF8;
+                border: 1px solid #38BDF8;
+                border-radius: 3px;
+                padding: 4px 10px;
+                font-weight: bold;
+                font-size: 8pt;
+            }
+            QPushButton:hover {
+                background-color: #38BDF8;
+                color: #0F172A;
+            }
+        """)
+        export_menu = QMenu(self)
+        export_csv_action = export_menu.addAction("Export to CSV (*.csv)...")
+        export_csv_action.triggered.connect(lambda: self._export_data(file_format="csv"))
+        export_xlsx_action = export_menu.addAction("Export to Excel (*.xlsx)...")
+        export_xlsx_action.triggered.connect(lambda: self._export_data(file_format="xlsx"))
+        self._export_btn.setMenu(export_menu)
+        controls.addWidget(self._export_btn)
+
         root.addLayout(controls)
 
-        # 6. Tabbed Tables (Hotspots Table, Cell Types Table)
+        # 7. Tabbed Tables (Hotspots Table, Cell Types Table)
         self._tabs = QTabWidget()
         self._instance_table = self._create_table(("Drop (mV)", "Cell Type", "Instance Name"))
         self._instance_table.cellClicked.connect(self._on_instance_row_clicked)
@@ -514,8 +664,16 @@ class IRDropWidget(QWidget):
         self._metric_labels["p95"].setText(f"{report.percentile_95_mv:.1f} mV")
         self._metric_labels["max"].setText(f"{report.maximum_mv:.1f} mV")
 
-        palette_count = len(self._map_legend_labels)
+        self._bin_mode_combo.blockSignals(True)
+        self._bin_mode_combo.setCurrentIndex(0)
+        self._bin_mode_combo.blockSignals(False)
+        self._bin_step_spin.hide()
+        self._bin_ranges_edit.hide()
+        self._apply_bins_btn.hide()
         span = report.maximum_mv - report.minimum_mv
+        self._bin_step_spin.setValue(max(round(span / 10.0, 1), 1.0) if span > 0 else 10.0)
+
+        palette_count = len(self._map_legend_labels)
         for index, label in enumerate(self._map_legend_labels):
             low = report.minimum_mv + span * index / palette_count
             high = report.minimum_mv + span * (index + 1) / palette_count
@@ -548,6 +706,12 @@ class IRDropWidget(QWidget):
         self._cell_table.setRowCount(0)
         self._file_edit.clear()
         self._search.clear()
+        self._bin_mode_combo.blockSignals(True)
+        self._bin_mode_combo.setCurrentIndex(0)
+        self._bin_mode_combo.blockSignals(False)
+        self._bin_step_spin.hide()
+        self._bin_ranges_edit.hide()
+        self._apply_bins_btn.hide()
         self._map_toggle.setChecked(False)
         for label in self._metric_labels.values():
             label.setText("-")
@@ -590,12 +754,221 @@ class IRDropWidget(QWidget):
                 self._layout_viewer.setIRDropData(self._report)
             self._layout_viewer.setIRDropMapVisible(checked)
 
-    def _sync_map_data(self) -> None:
+    def _sync_map_data(self, force_rebuild: bool = False) -> None:
         if self._layout_viewer is not None:
-            self._layout_viewer.setIRDropData(self._report)
+            if hasattr(self._layout_viewer, "setIRDropData"):
+                self._layout_viewer.setIRDropData(self._report, force_rebuild=force_rebuild)
             if hasattr(self._layout_viewer, "setIRDropSelectedBin"):
                 self._layout_viewer.setIRDropSelectedBin(self._selected_bin)
             self._layout_viewer.setIRDropMapVisible(self._map_toggle.isChecked())
+
+    def _on_bin_mode_changed(self, index: int) -> None:
+        if index == 0:
+            self._bin_step_spin.hide()
+            self._bin_ranges_edit.hide()
+            self._apply_bins_btn.hide()
+            self._on_reset_bins()
+        elif index == 1:
+            self._bin_step_spin.show()
+            self._bin_ranges_edit.hide()
+            self._apply_bins_btn.show()
+            self._bin_step_spin.setFocus()
+        elif index == 2:
+            self._bin_step_spin.hide()
+            self._bin_ranges_edit.show()
+            self._apply_bins_btn.show()
+            self._bin_ranges_edit.setFocus()
+
+    def _on_apply_bins(self) -> None:
+        if self._report is None:
+            self._status.setText("Load a report first to configure histogram bins")
+            return
+        mode = self._bin_mode_combo.currentIndex()
+        try:
+            if mode == 1:
+                step = self._bin_step_spin.value()
+                if step <= 0.0:
+                    self._status.setText("Step size must be greater than 0 mV")
+                    return
+                ok = self._report.set_step_size(step)
+                if not ok:
+                    self._status.setText("Could not calculate step bins")
+                    return
+                self._histogram.set_bins(self._report.bins)
+                self._selected_bin = None
+                self._sync_map_data(force_rebuild=True)
+                self._refresh_tables()
+                self._status.setText(f"Applied step size: {step:.1f} mV ({len(self._report.bins)} bins)")
+            elif mode == 2:
+                text = self._bin_ranges_edit.text().strip()
+                if not text:
+                    self._status.setText("Please enter comma-separated cutoffs (e.g. 20, 40, 60) or ranges")
+                    return
+                ranges = parse_range_spec(text, self._report.minimum_mv, self._report.maximum_mv)
+                ok = self._report.set_custom_ranges(ranges)
+                if not ok:
+                    self._status.setText("Could not apply custom ranges")
+                    return
+                self._histogram.set_bins(self._report.bins)
+                self._selected_bin = None
+                self._sync_map_data(force_rebuild=True)
+                self._refresh_tables()
+                self._status.setText(f"Applied {len(self._report.bins)} custom ranges")
+        except Exception as exc:
+            self._status.setText(f"Error configuring bins: {exc}")
+
+    def _on_reset_bins(self) -> None:
+        if self._report is None:
+            return
+        self._report.reset_uniform_bins(24)
+        self._histogram.set_bins(self._report.bins)
+        self._selected_bin = None
+        self._sync_map_data(force_rebuild=True)
+        self._refresh_tables()
+        self._status.setText("Histogram reset to default 24 uniform bins")
+
+    def _export_data(
+        self,
+        file_path: Optional[str] = None,
+        file_format: Optional[str] = None,
+        show_dialog: bool = True,
+    ) -> Optional[str]:
+        """Exports the resultant filtered list of cells to CSV or Excel (.xlsx) including coordinates."""
+        if self._report is None or not self._filtered_instances:
+            if show_dialog:
+                QMessageBox.information(self, "Export", "No cell instances match the current filters to export.")
+            return None
+
+        active_tab = self._tabs.currentIndex()
+        default_name = "ir_drop_hotspots.csv" if active_tab == 0 else "ir_drop_cell_types.csv"
+        if file_format == "xlsx":
+            default_name = os.path.splitext(default_name)[0] + ".xlsx"
+
+        path = file_path
+        if not path and show_dialog:
+            filter_str = (
+                "CSV Spreadsheet (*.csv);;All Files (*.*)"
+                if file_format == "csv"
+                else (
+                    "Excel Workbook (*.xlsx);;All Files (*.*)"
+                    if file_format == "xlsx"
+                    else "CSV Spreadsheet (*.csv);;Excel Workbook (*.xlsx);;All Files (*.*)"
+                )
+            )
+            path, _ = QFileDialog.getSaveFileName(self, "Export Hotspots", default_name, filter_str)
+
+        if not path:
+            return None
+
+        is_excel = path.lower().endswith(".xlsx")
+
+        if active_tab == 0:
+            headers = [
+                "Instance Name",
+                "Voltage Drop (mV)",
+                "Cell Type",
+                "X (um)",
+                "Y (um)",
+                "Placement Status",
+                "IR-Drop Range (mV)",
+            ]
+            rows: List[List[Any]] = []
+            records = self._report.records_by_instance
+            bins = getattr(self._report, "bins", [])
+            has_hbin_fn = hasattr(self._report, "histogram_bin_index")
+            loc_fn = getattr(self._layout_viewer, "getInstanceLocation", None) if self._layout_viewer else None
+
+            for inst_name in self._filtered_instances:
+                rec = records.get(inst_name)
+                drop_mv = rec[0] if rec else 0.0
+                cell_type = rec[1] if rec else ""
+
+                bin_range_str = ""
+                if bins and has_hbin_fn:
+                    h_idx = self._report.histogram_bin_index(drop_mv)
+                    if 0 <= h_idx < len(bins):
+                        b = bins[h_idx]
+                        bin_range_str = f"{b.minimum_mv:.2f} - {b.maximum_mv:.2f}"
+
+                x_val, y_val, status_val = "", "", "N/A"
+                if loc_fn:
+                    loc = loc_fn(inst_name)
+                    if loc:
+                        x_val, y_val, status_val = loc
+
+                rows.append([inst_name, round(drop_mv, 4), cell_type, x_val, y_val, status_val, bin_range_str])
+            sheet_title = "Hotspot Cells"
+        else:
+            headers = ["Cell Type", "Instance Count", "Mean Drop (mV)", "Worst Drop (mV)", "Worst Instance"]
+            rows = []
+            stats = getattr(self._report, "cell_type_stats", {})
+            for name, (count, mean_drop, worst_drop, worst_inst) in stats.items():
+                rows.append([name, count, round(mean_drop, 4), round(worst_drop, 4), worst_inst])
+            sheet_title = "Cell Type Stats"
+
+        try:
+            if is_excel:
+                self._write_excel(path, headers, rows, sheet_title=sheet_title)
+            else:
+                self._write_csv(path, headers, rows)
+            self._status.setText(f"Exported {len(rows):,} rows to {os.path.basename(path)}")
+            if show_dialog:
+                QMessageBox.information(
+                    self,
+                    "Export Complete",
+                    f"Successfully exported {len(rows):,} rows to:\n{path}",
+                )
+            return path
+        except Exception as exc:
+            self._status.setText(f"Export failed: {exc}")
+            if show_dialog:
+                QMessageBox.critical(self, "Export Error", f"Failed to export file:\n{exc}")
+            raise
+
+    @staticmethod
+    def _write_csv(path: str, headers: List[str], rows: List[List[Any]]) -> None:
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            writer.writerows(rows)
+
+    @staticmethod
+    def _write_excel(path: str, headers: List[str], rows: List[List[Any]], sheet_title: str = "IR Drop Cells") -> None:
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+            from openpyxl.utils import get_column_letter
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = sheet_title
+
+            ws.append(headers)
+            header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+            header_font = Font(name="Segoe UI", size=10, bold=True, color="FFFFFF")
+            header_align = Alignment(horizontal="center", vertical="center")
+
+            for col_idx in range(1, len(headers) + 1):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = header_align
+
+            for row in rows:
+                ws.append(row)
+
+            ws.freeze_panes = "A2"
+
+            for col in ws.columns:
+                max_len = max(len(str(cell.value or "")) for cell in col)
+                col_letter = get_column_letter(col[0].column)
+                ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 50)
+
+            wb.save(path)
+        except ImportError:
+            fallback_csv = os.path.splitext(path)[0] + ".csv"
+            IRDropWidget._write_csv(fallback_csv, headers, rows)
+            raise RuntimeError(f"openpyxl module is not available. Exported as CSV instead: {fallback_csv}")
 
     def _on_bin_selected(self, selected: Optional[IRDropBin]) -> None:
         """Instant O(1) bin filtering without scanning the entire design."""

@@ -389,7 +389,7 @@ class LayoutViewer(QWidget):
         die = self.getBounds()
         die_w = die.dx() if hasattr(die, "dx") and isinstance(die.dx(), (int, float)) else 0
         die_h = die.dy() if hasattr(die, "dy") and isinstance(die.dy(), (int, float)) else 0
-        if die_w > 20000 and die_h > 20000 and (rect.dx() < 12000 or rect.dy() < 12000):
+        if die_w > 20000 and die_h > 20000 and (rect.dx() < 12000 and rect.dy() < 12000):
             c_pt = rect.center()
             span_w = max(rect.dx() * 4, min(12000, int(die_w // 4)))
             span_h = max(rect.dy() * 4, min(12000, int(die_h // 4)))
@@ -666,8 +666,8 @@ class LayoutViewer(QWidget):
                         self._timing_connectivity.setdefault(inst_n, []).append(pt_next)
                         self._timing_connectivity.setdefault(leaf_n, []).append(pt_next)
 
-    def setIRDropData(self, report_data: Optional[Any]) -> None:
-        if self._ir_drop_data is report_data and (report_data is None or self._ir_drop_name_to_bin or self._ir_drop_prefixes):
+    def setIRDropData(self, report_data: Optional[Any], force_rebuild: bool = False) -> None:
+        if not force_rebuild and self._ir_drop_data is report_data and (report_data is None or self._ir_drop_name_to_bin or self._ir_drop_prefixes):
             return
         self._ir_drop_data = report_data
         self._ir_drop_selected_bin = None
@@ -680,6 +680,7 @@ class LayoutViewer(QWidget):
         self._instance_resolve_cache = {}
         self._ir_drop_inst_bins = None
         self._ir_drop_inst_hbins = None
+        self._ir_drop_cache_ready = False
         self._build_ir_drop_color_cache()
         if self._ir_drop_map_visible:
             self.fullRepaint()
@@ -728,6 +729,24 @@ class LayoutViewer(QWidget):
 
     def isIRDropMapVisible(self) -> bool:
         return self._ir_drop_map_visible and self._ir_drop_data is not None
+
+    def getInstanceLocation(self, instance_name: str) -> Optional[Tuple[float, float, str]]:
+        """Returns (x_microns, y_microns, placement_status) for the given instance name, or None."""
+        if not self.hasDesign():
+            return None
+        inst = self.resolve_instance(instance_name)
+        if inst is None:
+            return None
+        is_placed = getattr(inst, "isPlaced", lambda: True)()
+        status = "PLACED" if is_placed else "UNPLACED"
+        bbox = inst.getBBox().getBox() if hasattr(inst, "getBBox") else None
+        if bbox is None:
+            return None
+        chip = self.getChip()
+        tech = getattr(chip, "getTech", lambda: None)() if chip else None
+        dbu_per_um = tech.getDbuPerMicron() if (tech and hasattr(tech, "getDbuPerMicron")) else 1000
+        center = bbox.center()
+        return (round(center.x / float(dbu_per_um), 4), round(center.y / float(dbu_per_um), 4), status)
 
     def resolve_instance(self, instance_name: str, _allow_pin_strip: bool = True) -> Optional[Any]:
         """Resolves an instance by name across DEF naming discrepancies (escapes, prefixes, MBFFs, buses, pins, leaf)."""

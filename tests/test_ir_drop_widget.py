@@ -838,4 +838,177 @@ def test_ir_drop_histogram_bin_selection_filters_colored_cells(qapp, tmp_path):
     viewer.close()
 
 
+def test_parse_range_spec_and_custom_binning(tmp_path):
+    from rishi.irdrop.report import parse_range_spec
+
+    # 1. Comma-separated cutoffs
+    r1 = parse_range_spec("25, 50, 75", default_min=0.0, default_max=100.0)
+    assert r1 == [(0.0, 25.0), (25.0, 50.0), (50.0, 75.0), (75.0, 100.0)]
+
+    # 2. Explicit range pairs
+    r2 = parse_range_spec("0-20, 20-60, 60-100", default_min=0.0, default_max=100.0)
+    assert r2 == [(0.0, 20.0), (20.0, 60.0), (60.0, 100.0)]
+
+    # 3. Open-ended range with + and <
+    r3 = parse_range_spec("<30, 30-70, 70+", default_min=10.0, default_max=120.0)
+    assert len(r3) == 3
+    assert r3[1] == (30.0, 70.0)
+
+    # 4. Step size binning on report data
+    report_file = tmp_path / "custom_bins.rpt"
+    report_file.write_text(
+        """0.8800 0.9000 0.8800 0 10 20 0.90 vdd/gnd INV_X1 top/u1
+0.8500 0.9000 0.8500 0 20 20 0.90 vdd/gnd BUF_X1 top/u2
+0.8100 0.9000 0.8100 0 30 20 0.90 vdd/gnd NAND_X1 top/u3
+0.7600 0.9000 0.7600 0 40 20 0.90 vdd/gnd NOR_X1 top/u4
+""",
+        encoding="utf-8",
+    )
+    data = IRDropParser().parse_file(str(report_file))
+    # drops: u1=20mV, u2=50mV, u3=90mV, u4=140mV (min=20, max=140)
+    assert data.minimum_mv == 20.0
+    assert data.maximum_mv == 140.0
+
+    # Test step size of 40 mV: [20..60], [60..100], [100..140] -> 3 bins
+    ok = data.set_step_size(40.0)
+    assert ok is True
+    assert len(data.bins) == 3
+    assert data.bins[0].count == 2  # u1(20), u2(50)
+    assert data.bins[1].count == 1  # u3(90)
+    assert data.bins[2].count == 1  # u4(140)
+    assert "top/u1" in data.bin_instances[0]
+    assert "top/u2" in data.bin_instances[0]
+    assert "top/u3" in data.bin_instances[1]
+    assert "top/u4" in data.bin_instances[2]
+
+    # Test custom ranges: [(0, 40), (40, 100), (100, 200)]
+    ok2 = data.set_custom_ranges([(0.0, 40.0), (40.0, 100.0), (100.0, 200.0)])
+    assert ok2 is True
+    assert len(data.bins) == 3
+    assert data.bins[0].count == 1  # u1(20)
+    assert data.bins[1].count == 2  # u2(50), u3(90)
+    assert data.bins[2].count == 1  # u4(140)
+
+    # Test reset to 24 uniform bins
+    data.reset_uniform_bins(24)
+    assert len(data.bins) == 24
+    assert sum(b.count for b in data.bins) == 4
+
+
+def test_ir_drop_widget_custom_bins_ui_and_filtering(qapp, tmp_path):
+    report_file = tmp_path / "ui_bins.rpt"
+    report_file.write_text(
+        """0.8800 0.9000 0.8800 0 10 20 0.90 vdd/gnd INV_X1 top/cell_a
+0.8200 0.9000 0.8200 0 20 20 0.90 vdd/gnd BUF_X1 top/cell_b
+0.7200 0.9000 0.7200 0 30 20 0.90 vdd/gnd NAND_X1 top/cell_c
+""",
+        encoding="utf-8",
+    )
+    data = IRDropParser().parse_file(str(report_file))
+    # drops: cell_a=20mV, cell_b=80mV, cell_c=180mV
+    widget = IRDropWidget()
+    widget.set_report_data(data)
+    assert len(widget._histogram._bins) == 24
+
+    # 1. Switch mode to Step Size (index 1) and apply 60 mV step
+    widget._bin_mode_combo.setCurrentIndex(1)
+    assert not widget._bin_step_spin.isHidden()
+    widget._bin_step_spin.setValue(60.0)
+    widget._on_apply_bins()
+
+    # With min=20, max=180, step=60: [20..80], [80..140], [140..180] -> 3 bins
+    assert len(data.bins) == 3
+    assert len(widget._histogram._bins) == 3
+
+    # Click on the middle bin ([80..140], which contains cell_b)
+    mid_bin = data.bins[1]
+    widget._on_bin_selected(mid_bin)
+    assert len(widget._filtered_instances) == 1
+    assert widget._filtered_instances[0] == "top/cell_b"
+
+    # 2. Switch mode to Custom Ranges (index 2) and apply "50, 100"
+    widget._bin_mode_combo.setCurrentIndex(2)
+    assert not widget._bin_ranges_edit.isHidden()
+    widget._bin_ranges_edit.setText("50, 100")
+    widget._on_apply_bins()
+
+    # Cutoffs: 50, 100 -> [20..50], [50..100], [100..180]
+    assert len(data.bins) == 3
+    assert data.bins[0].count == 1  # cell_a (20 mV)
+    assert data.bins[1].count == 1  # cell_b (80 mV)
+    assert data.bins[2].count == 1  # cell_c (180 mV)
+
+    # 3. Reset bins
+    widget._on_reset_bins()
+    assert len(data.bins) == 24
+    assert len(widget._histogram._bins) == 24
+    widget.close()
+
+
+def test_ir_drop_export_csv_and_excel(qapp, tmp_path):
+    import csv
+    import openpyxl
+
+    report_file = tmp_path / "export_test.rpt"
+    report_file.write_text(
+        """0.8700 0.9000 0.8700 0 10 20 0.90 vdd/gnd INV_X1 top/cell_1
+0.7800 0.9000 0.7800 0 20 20 0.90 vdd/gnd BUF_X2 top/cell_2
+""",
+        encoding="utf-8",
+    )
+    data = IRDropParser().parse_file(str(report_file))
+
+    # Mock viewer that provides location
+    viewer = MagicMock()
+    viewer.getInstanceLocation.side_effect = lambda name: (
+        (12.3456, 78.9012, "PLACED") if "cell_1" in name else (45.6789, 23.4567, "PLACED")
+    )
+
+    widget = IRDropWidget(layout_viewer=viewer)
+    widget.set_report_data(data)
+
+    # 1. Export to CSV
+    csv_path = str(tmp_path / "exported_hotspots.csv")
+    res_csv = widget._export_data(file_path=csv_path, file_format="csv", show_dialog=False)
+    assert res_csv == csv_path
+    assert os.path.isfile(csv_path)
+
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
+        reader = list(csv.reader(f))
+        assert len(reader) == 3  # 1 header + 2 instances
+        headers = reader[0]
+        assert "Instance Name" in headers
+        assert "Voltage Drop (mV)" in headers
+        assert "X (um)" in headers
+        assert "Y (um)" in headers
+        assert "Placement Status" in headers
+
+        row1 = reader[1]
+        assert row1[0] == "top/cell_2"  # highest drop first
+        assert "120" in row1[1]
+        assert "45.6789" in row1[3]
+        assert "23.4567" in row1[4]
+        assert row1[5] == "PLACED"
+
+    # 2. Export to Excel (.xlsx)
+    xlsx_path = str(tmp_path / "exported_hotspots.xlsx")
+    res_xlsx = widget._export_data(file_path=xlsx_path, file_format="xlsx", show_dialog=False)
+    assert res_xlsx == xlsx_path
+    assert os.path.isfile(xlsx_path)
+
+    wb = openpyxl.load_workbook(xlsx_path)
+    assert "Hotspot Cells" in wb.sheetnames
+    ws = wb["Hotspot Cells"]
+    assert ws.max_row == 3
+    assert ws.cell(row=1, column=1).value == "Instance Name"
+    assert ws.cell(row=1, column=4).value == "X (um)"
+    assert ws.cell(row=1, column=5).value == "Y (um)"
+    assert ws.cell(row=2, column=1).value == "top/cell_2"
+    assert ws.cell(row=2, column=4).value == 45.6789 or ws.cell(row=2, column=4).value == "45.6789"
+    wb.close()
+
+    widget.close()
+
+
+
 
