@@ -1010,5 +1010,44 @@ def test_ir_drop_export_csv_and_excel(qapp, tmp_path):
     widget.close()
 
 
+def test_export_excel_without_openpyxl_native_fallback(qapp, tmp_path, monkeypatch):
+    """Verify that export to Excel works seamlessly via native OpenXML builder when openpyxl is not installed."""
+    import sys
+
+    # Simulate environment where openpyxl is not installed
+    monkeypatch.setitem(sys.modules, "openpyxl", None)
+
+    report_text = """0.8500 0.9000 0.8500 0 10 20 0.90 vdd/gnd INV_X1 top/cell_1
+0.7800 0.9000 0.7800 0 10 20 0.90 vdd/gnd BUF_X2 top/cell_2
+"""
+    rpt_file = tmp_path / "test_no_openpyxl.rpt"
+    rpt_file.write_text(report_text, encoding="utf-8")
+    data = IRDropParser().parse_file(str(rpt_file))
+
+    widget = IRDropWidget()
+    widget.set_report_data(data)
+
+    xlsx_path = str(tmp_path / "fallback_native.xlsx")
+    res = widget._export_data(file_path=xlsx_path, file_format="xlsx", show_dialog=False)
+    assert res == xlsx_path
+    assert os.path.isfile(xlsx_path)
+    assert not os.path.isfile(xlsx_path.replace(".xlsx", ".csv"))
+
+    # Unpatch to inspect the generated xlsx with zipfile / openpyxl
+    monkeypatch.undo()
+    import openpyxl
+    wb = openpyxl.load_workbook(xlsx_path)
+    assert "Hotspot Cells" in wb.sheetnames
+    ws = wb["Hotspot Cells"]
+    assert ws.max_row == 3
+    assert ws.cell(row=1, column=1).value == "Instance Name"
+    assert ws.cell(row=2, column=1).value == "top/cell_2"
+    assert ws.cell(row=2, column=2).value == 120.0
+    wb.close()
+
+    widget.close()
+
+
+
 
 

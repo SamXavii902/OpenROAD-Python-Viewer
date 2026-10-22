@@ -7,6 +7,8 @@ import math
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import xml.sax.saxutils
+import zipfile
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
@@ -933,6 +935,123 @@ class IRDropWidget(QWidget):
             writer.writerows(rows)
 
     @staticmethod
+    def _write_xlsx_native(path: str, headers: List[str], rows: List[List[Any]], sheet_title: str = "IR Drop Cells") -> None:
+        """Pure-Python standard library OpenXML (.xlsx) writer requiring zero third-party dependencies."""
+        def col_letter(col_idx: int) -> str:
+            res = ""
+            while col_idx > 0:
+                col_idx, rem = divmod(col_idx - 1, 26)
+                res = chr(65 + rem) + res
+            return res
+
+        safe_title = xml.sax.saxutils.escape(sheet_title[:31] if sheet_title else "Sheet1")
+
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(
+                "[Content_Types].xml",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'
+                '  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n'
+                '  <Default Extension="xml" ContentType="application/xml"/>\n'
+                '  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>\n'
+                '  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>\n'
+                '  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>\n'
+                '</Types>',
+            )
+            zf.writestr(
+                "_rels/.rels",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
+                '  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>\n'
+                '</Relationships>',
+            )
+            zf.writestr(
+                "xl/_rels/workbook.xml.rels",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
+                '  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>\n'
+                '  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>\n'
+                '</Relationships>',
+            )
+            zf.writestr(
+                "xl/workbook.xml",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\n'
+                f'  <sheets>\n    <sheet name="{safe_title}" sheetId="1" r:id="rId1"/>\n  </sheets>\n'
+                '</workbook>',
+            )
+            zf.writestr(
+                "xl/styles.xml",
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">\n'
+                '  <fonts count="2">\n'
+                '    <font><name val="Segoe UI"/><sz val="10"/><color theme="1"/></font>\n'
+                '    <font><b/><name val="Segoe UI"/><sz val="10"/><color rgb="FFFFFFFF"/></font>\n'
+                '  </fonts>\n'
+                '  <fills count="3">\n'
+                '    <fill><patternFill patternType="none"/></fill>\n'
+                '    <fill><patternFill patternType="gray125"/></fill>\n'
+                '    <fill><patternFill patternType="solid"><fgColor rgb="FF1E293B"/><bgColor indexed="64"/></patternFill></fill>\n'
+                '  </fills>\n'
+                '  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>\n'
+                '  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>\n'
+                '  <cellXfs count="2">\n'
+                '    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>\n'
+                '    <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1">\n'
+                '      <alignment horizontal="center" vertical="center"/>\n'
+                '    </xf>\n'
+                '  </cellXfs>\n'
+                '  <cellStyles count="1">\n'
+                '    <cellStyle name="Normal" xfId="0" builtinId="0"/>\n'
+                '  </cellStyles>\n'
+                '</styleSheet>',
+            )
+
+            col_widths = [max(len(str(h)), 10) for h in headers]
+            for row in rows:
+                for i, val in enumerate(row):
+                    if i < len(col_widths):
+                        col_widths[i] = max(col_widths[i], len(str(val if val is not None else "")))
+
+            sheet_parts = [
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n',
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">\n',
+                '  <sheetViews>\n    <sheetView tabSelected="1" workbookViewId="0">\n',
+                '      <pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>\n',
+                '    </sheetView>\n  </sheetViews>\n',
+                '  <cols>\n',
+            ]
+            for idx, width in enumerate(col_widths, 1):
+                cw = min(max(width + 3, 12), 50)
+                sheet_parts.append(f'    <col min="{idx}" max="{idx}" width="{cw}" customWidth="1"/>\n')
+            sheet_parts.append('  </cols>\n  <sheetData>\n')
+
+            # Header row
+            sheet_parts.append('    <row r="1">\n')
+            for c_idx, h in enumerate(headers, 1):
+                cell_ref = f"{col_letter(c_idx)}1"
+                esc_val = xml.sax.saxutils.escape(str(h))
+                sheet_parts.append(f'      <c r="{cell_ref}" s="1" t="inlineStr"><is><t>{esc_val}</t></is></c>\n')
+            sheet_parts.append('    </row>\n')
+
+            # Data rows
+            for r_idx, row in enumerate(rows, 2):
+                sheet_parts.append(f'    <row r="{r_idx}">\n')
+                for c_idx, val in enumerate(row, 1):
+                    cell_ref = f"{col_letter(c_idx)}{r_idx}"
+                    if val is None or val == "":
+                        continue
+                    if isinstance(val, (int, float)) and not isinstance(val, bool):
+                        sheet_parts.append(f'      <c r="{cell_ref}"><v>{val}</v></c>\n')
+                    else:
+                        esc_val = xml.sax.saxutils.escape(str(val))
+                        sheet_parts.append(f'      <c r="{cell_ref}" t="inlineStr"><is><t>{esc_val}</t></is></c>\n')
+                sheet_parts.append('    </row>\n')
+
+            sheet_parts.append('  </sheetData>\n</worksheet>')
+            zf.writestr("xl/worksheets/sheet1.xml", "".join(sheet_parts))
+
+    @staticmethod
     def _write_excel(path: str, headers: List[str], rows: List[List[Any]], sheet_title: str = "IR Drop Cells") -> None:
         try:
             import openpyxl
@@ -965,10 +1084,10 @@ class IRDropWidget(QWidget):
                 ws.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 50)
 
             wb.save(path)
-        except ImportError:
-            fallback_csv = os.path.splitext(path)[0] + ".csv"
-            IRDropWidget._write_csv(fallback_csv, headers, rows)
-            raise RuntimeError(f"openpyxl module is not available. Exported as CSV instead: {fallback_csv}")
+        except Exception:
+            # Seamlessly fallback to zero-dependency standard-library OpenXML generator
+            # so Excel export works 100% out-of-the-box in all Python environments
+            IRDropWidget._write_xlsx_native(path, headers, rows, sheet_title)
 
     def _on_bin_selected(self, selected: Optional[IRDropBin]) -> None:
         """Instant O(1) bin filtering without scanning the entire design."""
